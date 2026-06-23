@@ -361,6 +361,30 @@ cloud:
     ownerClusterRole: admin
     memberClusterRole: edit
     viewerClusterRole: view
+    # Grant cluster-scoped READ (Nodes, PVs, StorageClasses, IngressClasses,
+    # PriorityClasses) on top of the built-in view/edit/admin roles, which
+    # exclude cluster-scoped resources. Per tier, each default true — Radar is a
+    # cluster-wide observability tool, so by default every tier (incl. viewer)
+    # sees core infrastructure. No Secrets or RBAC objects.
+    #
+    # Set a tier false to make it namespaced-only. Common for security-conscious
+    # orgs: clusterScopedRead.viewer=false → viewers get the stock `view`
+    # (namespaced read) and cannot enumerate cluster infra.
+    #
+    # Independent of *ClusterRole above: a custom namespaced role does NOT disable
+    # cluster-read (they're separate bindings). Want a tier to read a DIFFERENT
+    # cluster-scoped set (e.g. Nodes but not PVs)? Set its flag false and bind your
+    # own ClusterRole to the cloud:<tier> group — the cloud:* groups exist
+    # regardless of this chart, so your binding composes cleanly.
+    clusterScopedRead:
+      viewer: true
+      member: true
+      owner: true
+    # Grant the owner tier node cordon/drain (patch nodes + evict pods).
+    # Cluster-scoped WRITE, so OFF by default — set true to let owners cordon/
+    # drain nodes from Radar. Not cluster-admin (no node delete, no RBAC/secret
+    # access).
+    nodeOps: false
 
 # MCP (Model Context Protocol) server for AI tools
 mcp:

@@ -174,6 +174,7 @@ Under cloud-mode (`RADAR_CLOUD_MODE=true`, set automatically by the chart when `
 
 - Forces `--auth-mode=proxy` with pinned `X-Forwarded-User` / `X-Forwarded-Groups` headers — the Cloud tunnel is the trust boundary.
 - Ships three default ClusterRoleBindings mapping Cloud's `cloud:owner` / `cloud:member` / `cloud:viewer` groups to the standard K8s `admin` / `edit` / `view` ClusterRoles. Configurable via `cloud.defaultRbac.*` in `values.yaml`.
+- Adds a **cluster-read add-on** (`cloud.defaultRbac.clusterScopedRead.{viewer,member,owner}`, each default on) granting `get/list/watch` on the cluster-scoped infra the built-in `view`/`edit`/`admin` roles exclude — Nodes, PersistentVolumes, StorageClasses, IngressClasses, PriorityClasses. No Secrets, no RBAC objects. It's an independent axis per tier: set a tier `false` to make it namespaced-only (e.g. `clusterScopedRead.viewer: false`). Owner node cordon/drain is a separate cluster-scoped *write*, off by default (`cloud.defaultRbac.nodeOps`).
 - Hardens the listener (no `/debug/pprof/*`, narrower exempt paths).
 
 <a id="cloud-mode-helm-bindings"></a>

@@ -1,0 +1,49 @@
+{{- /*
+Node operations for the owner tier — cordon / uncordon / drain from Radar.
+
+These are the exact verbs Radar's node-ops path uses (pkg/k8score/node_ops.go):
+  - patch nodes            → cordon / uncordon (spec.unschedulable strategic merge)
+  - list pods (all ns)     → enumerate pods on the node to drain
+  - create pods/eviction   → evict them (PodDisruptionBudgets are enforced by the
+                             eviction API itself, so no PDB read is needed)
+
+`patch nodes` is what cordon/uncordon needs, but K8s RBAC can't scope a verb to a
+single field — so this grant also permits editing any other node field (labels,
+taints, etc.). That breadth is inherent to `patch nodes`; it's why this is a
+cluster-scoped WRITE, owner-only, and behind its own toggle (cloud.defaultRbac
+.nodeOps). Still far short of cluster-admin: no node delete, no RBAC/secret access.
+Set nodeOps=false to keep owners read-only on cluster-scoped resources.
+*/}}
+{{- if and .Values.cloud.enabled .Values.cloud.defaultRbac.create .Values.rbac.create .Values.cloud.defaultRbac.nodeOps .Values.cloud.defaultRbac.owner -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "radar.fullname" . }}-node-ops
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "radar.fullname" . }}-cloud-owner-node-ops
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "radar.fullname" . }}-node-ops
+subjects:
+  - kind: Group
+    name: cloud:owner
+    apiGroup: rbac.authorization.k8s.io
+{{- end -}}
