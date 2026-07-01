@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useLocation, useSearchParams, useNavigationType, NavigationType } from 'react-router-dom'
 import { HomeView } from './components/home/HomeView'
 import { DebugOverlay } from './components/DebugOverlay'
-import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, gitOpsRouteForKind, gitOpsRouteForResource } from '@skyhook-io/k8s-ui'
+import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, gitOpsRouteForKind, gitOpsRouteForResource, assetUrl } from '@skyhook-io/k8s-ui'
 import { initNavigationMap } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useAPIResources } from './api/apiResources'
 import { TimelineView } from './components/timeline/TimelineView'
@@ -63,6 +63,9 @@ import { kindToPlural, pluralToKind, openExternal, apiVersionToGroup, buildWorkl
 import { type OmnibarHandle } from './components/ui/Omnibar'
 import { RadarOmnibar } from './components/ui/RadarOmnibar'
 import type { ContextSwitcherHandle } from './components/ContextSwitcher'
+
+const radarLoadingIconUrl = assetUrl(radarLoadingIcon)
+const radarLogoUrl = assetUrl('/images/radar/radar-icon.svg')
 
 // All possible node kinds (core + GitOps)
 const ALL_NODE_KINDS: NodeKind[] = [
@@ -187,7 +190,7 @@ function AuthBarrier({ authMode }: { authMode: string }) {
       <div className="flex-1 relative bg-theme-base">
         <div className="absolute inset-0 pointer-events-none">
           <img
-            src={radarLoadingIcon}
+            src={radarLoadingIconUrl}
             alt=""
             aria-hidden
             // Integer offset (50% − 22) — matches the Connecting/Opening splashes;
@@ -1745,7 +1748,7 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
               icon's screen position. */}
           <div className="absolute inset-0 pointer-events-none">
             <img
-              src={radarLoadingIcon}
+              src={radarLoadingIconUrl}
               alt=""
               aria-hidden
               // Integer offset (50% − 22) — avoids sub-pixel jitter from
@@ -1781,7 +1784,7 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
         <div className="flex-1 relative bg-theme-base">
           <div className="absolute inset-0 pointer-events-none">
             <img
-              src={radarLoadingIcon}
+              src={radarLoadingIconUrl}
               alt=""
               aria-hidden
               // Integer offset (50% − 22) — avoids sub-pixel jitter from
@@ -2083,7 +2086,7 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
                 the mark doesn't move or resize across the takeover hand-off. */}
             <div className="absolute inset-0 pointer-events-none">
               <img
-                src={radarLoadingIcon}
+                src={radarLoadingIconUrl}
                 alt=""
                 aria-hidden
                 className="absolute w-11 h-11"
@@ -2361,7 +2364,7 @@ function Logo() {
     <div className="flex items-center gap-2.5">
       <div className="relative w-7 h-7 rounded-lg overflow-hidden flex-shrink-0 bg-emerald-500/10 border border-emerald-500/20">
         <img
-          src="/images/radar/radar-icon.svg"
+          src={radarLogoUrl}
           alt=""
           aria-hidden
           className="w-full h-full p-0.5"

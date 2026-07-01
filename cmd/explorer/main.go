@@ -50,6 +50,7 @@ func main() {
 	kubeconfigDir := flag.String("kubeconfig-dir", fileCfg.KubeconfigDirsFlag(), "Comma-separated directories containing kubeconfig files (mutually exclusive with --kubeconfig)")
 	namespace := flag.String("namespace", fileCfg.Namespace, "Initial namespace filter (empty = all namespaces)")
 	port := flag.Int("port", fileCfg.PortOr(9280), "Server port")
+	basePath := flag.String("base-path", "", "URL path prefix to serve Radar under, e.g. /radar (empty = root). Use when an ingress forwards a subpath without stripping it.")
 	noBrowser := flag.Bool("no-browser", fileCfg.NoBrowser, "Don't auto-open browser")
 	browser := flag.String("browser", fileCfg.Browser, "Browser to use when opening the UI (default: OS default browser; macOS app names supported)")
 	devMode := flag.Bool("dev", false, "Development mode (serve frontend from filesystem)")
@@ -171,6 +172,10 @@ func main() {
 	if *kubeconfig != "" && *kubeconfigDir != "" {
 		log.Fatalf("--kubeconfig and --kubeconfig-dir are mutually exclusive")
 	}
+	normalizedBasePath, err := server.NormalizeBasePath(*basePath)
+	if err != nil {
+		log.Fatalf("Invalid --base-path %q: %v", *basePath, err)
+	}
 	timelineMaxSizeBytes, err := config.ParseByteSize(*timelineMaxSize)
 	if err != nil {
 		log.Fatalf("Invalid --timeline-max-size %q: %v", *timelineMaxSize, err)
@@ -201,6 +206,7 @@ func main() {
 		KubeconfigDirs:           app.ParseKubeconfigDirs(*kubeconfigDir),
 		Namespace:                *namespace,
 		Port:                     *port,
+		BasePath:                 normalizedBasePath,
 		NoBrowser:                *noBrowser,
 		Browser:                  *browser,
 		DevMode:                  *devMode,
@@ -302,7 +308,10 @@ func main() {
 
 	// Open browser — server is confirmed ready to accept connections
 	if !cfg.NoBrowser {
-		url := fmt.Sprintf("http://localhost:%d", cfg.Port)
+		url := fmt.Sprintf("http://localhost:%d%s", cfg.Port, cfg.BasePath)
+		if cfg.BasePath != "" {
+			url += "/"
+		}
 		if cfg.Namespace != "" {
 			url += fmt.Sprintf("?namespace=%s", cfg.Namespace)
 		}

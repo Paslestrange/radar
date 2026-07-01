@@ -4,7 +4,7 @@ import { Settings, X, RotateCcw, RotateCw, Loader2, Copy, Check, Pin, Shield, Lo
 import { clsx } from 'clsx'
 import { useAnimatedUnmount } from '../../hooks/useAnimatedUnmount'
 import { TRANSITION_BACKDROP, TRANSITION_PANEL } from '../../utils/animation'
-import { apiUrl, getAuthHeaders, getCredentialsMode } from '../../api/config'
+import { apiUrl, getAuthHeaders, getCredentialsMode, routePath } from '../../api/config'
 import { useCloudRole, useVersionCheck } from '../../api/client'
 import { useCapabilitiesContext } from '../../contexts/CapabilitiesContext'
 import { Tooltip } from '../ui/Tooltip'
@@ -461,7 +461,7 @@ function MCPSection({
   const [copied, setCopied] = useState(false)
 
   const currentPort = Number(window.location.port) || 80
-  const mcpUrl = `http://localhost:${currentPort}/mcp`
+  const mcpUrl = `http://localhost:${currentPort}${routePath('/mcp')}`
 
   const handleCopy = () => {
     navigator.clipboard.writeText(mcpUrl)

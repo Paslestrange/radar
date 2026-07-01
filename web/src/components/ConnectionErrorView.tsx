@@ -6,6 +6,7 @@ import { parseContextName } from '../utils/context-name'
 import { useOpenLocalTerminal, ClusterName } from '@skyhook-io/k8s-ui'
 import { useAuthMe } from '../api/client'
 import { Tooltip } from './ui/Tooltip'
+import { apiUrl } from '../api/config'
 
 interface ConnectionErrorViewProps {
   connection: ConnectionState
@@ -176,7 +177,7 @@ export function ConnectionErrorView({ connection, onRetry, isRetrying }: Connect
   // mode — but the chained retry curl carries no session cookie, so it 401s
   // once /api/connection is auth-gated. Only chain it when auth is *known*
   // disabled (authMe still loading → don't chain a doomed call).
-  const retryCmd = `curl -s -X POST http://${window.location.host}/api/connection/retry > /dev/null`
+  const retryCmd = `curl -s -X POST http://${window.location.host}${apiUrl('/connection/retry')} > /dev/null`
 
   const handleAuthInTerminal = () => {
     if (!authInfo?.authCommand) return

@@ -33,6 +33,7 @@ type AppConfig struct {
 	KubeconfigDirs           []string
 	Namespace                string
 	Port                     int
+	BasePath                 string
 	NoBrowser                bool
 	Browser                  string
 	DevMode                  bool
@@ -245,6 +246,7 @@ func CreateServer(cfg AppConfig) *server.Server {
 
 	serverCfg := server.Config{
 		Port:            cfg.Port,
+		BasePath:        cfg.BasePath,
 		DevMode:         cfg.DevMode,
 		StaticFS:        static.FS,
 		StaticRoot:      "dist",

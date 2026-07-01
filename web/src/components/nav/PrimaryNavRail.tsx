@@ -4,6 +4,9 @@ import { Home, Network, List, Clock, AlertTriangle, Package, GitBranch, Boxes, A
 import { clsx } from 'clsx'
 import type { MainView } from '../../types'
 import { Tooltip } from '../ui/Tooltip'
+import { assetUrl } from '@skyhook-io/k8s-ui'
+
+const radarLogoUrl = assetUrl('/images/radar/radar-icon.svg')
 
 // The views the rail can navigate to. Broader than k8s-ui's ExtendedMainView
 // (which omits 'applications') — it mirrors the navigable subset of App.tsx's
@@ -170,7 +173,7 @@ function BrandRow({ pinned, onNavigate }: { pinned: boolean; onNavigate: (view: 
       <span className="flex w-14 shrink-0 items-center justify-center">
         <span className="relative w-7 h-7 rounded-lg overflow-hidden bg-emerald-500/10 border border-emerald-500/20">
           <img
-            src="/images/radar/radar-icon.svg"
+            src={radarLogoUrl}
             alt=""
             aria-hidden
             className="w-full h-full p-0.5"
