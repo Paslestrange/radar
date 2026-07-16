@@ -26,27 +26,37 @@ function DiagnoseResourceButton({
 }) {
   const d = useDiagnose();
   const { runningKeys } = useDiagnoseLayout();
-  if (!d.available) return null;
+  // Hidden only when the feature can't work here (auth/cloud/--no-mcp). When it's
+  // supported but no agent is installed we KEEP the button — clicking opens the
+  // setup notice so the feature is discoverable rather than silently absent.
+  if (d.setupState === "off") return null;
+  const ready = d.available;
   const problem = health === "problem";
-  const running = runningKeys.has(runTargetKey(kind, namespace, name));
-  const tooltip = running
-    ? `${d.agentLabel} is investigating this resource — click to watch it live.`
-    : problem
-      ? `Diagnose with your own ${d.agentLabel} — runs locally, reads this resource's spec, events & logs to find the root cause.`
-      : `Ask your own ${d.agentLabel} about this resource — runs locally, reads its spec, events & logs.`;
+  const running = ready && runningKeys.has(runTargetKey(kind, namespace, name));
+  const tooltip = !ready
+    ? "Set up AI diagnosis to investigate this — runs your own agent locally."
+    : running
+      ? `${d.agentLabel} is investigating this resource — click to watch it live.`
+      : problem
+        ? `Diagnose with your own ${d.agentLabel} — runs locally, reads this resource's spec, events & logs to find the root cause.`
+        : `Ask your own ${d.agentLabel} about this resource — runs locally, reads its spec, events & logs.`;
   // While an investigation is live, the button advertises it (and clicking focuses
   // the existing run rather than starting a new one — openInvestigation dedups).
   const showLabel = problem || running;
   return (
     <Tooltip content={tooltip} position="bottom">
       <button
-        onClick={() => d.openInvestigation({ kind, namespace, name })}
+        onClick={() =>
+          ready ? d.openInvestigation({ kind, namespace, name }) : d.openHome()
+        }
         aria-label={
-          running
-            ? "Investigation running — click to view"
-            : problem
-              ? "Diagnose with AI"
-              : "Ask AI about this resource"
+          !ready
+            ? "Set up AI diagnosis"
+            : running
+              ? "Investigation running — click to view"
+              : problem
+                ? "Diagnose with AI"
+                : "Ask AI about this resource"
         }
         className={
           showLabel
@@ -92,16 +102,21 @@ export function IssueDiagnoseButton({
   name: string;
 }) {
   const d = useDiagnose();
-  if (!d.available) return null;
+  if (d.setupState === "off") return null;
+  const ready = d.available;
   return (
     <Tooltip
-      content={`Runs ${d.agentLabel} on your machine and sends it this resource's context to find the root cause`}
+      content={
+        ready
+          ? `Runs ${d.agentLabel} on your machine and sends it this resource's context to find the root cause`
+          : "Set up AI diagnosis — install a local agent to investigate"
+      }
       position="left"
     >
       <button
         onClick={(e) => {
           e.stopPropagation();
-          d.openInvestigation({ kind, namespace, name });
+          ready ? d.openInvestigation({ kind, namespace, name }) : d.openHome();
         }}
         className="flex shrink-0 items-center gap-1 rounded-md border border-theme-border px-2 py-1 text-xs text-theme-text-secondary hover:bg-theme-hover hover:text-theme-text-primary"
       >
@@ -117,14 +132,17 @@ export function IssueDiagnoseButton({
 export function GlobalDiagnoseButton() {
   const d = useDiagnose();
   const { runningKeys } = useDiagnoseLayout();
-  if (!d.available) return null;
+  if (d.setupState === "off") return null;
+  const ready = d.available;
   const runningCount = runningKeys.size;
   return (
     <Tooltip
       content={
-        runningCount > 0
-          ? `${runningCount} investigation${runningCount > 1 ? "s" : ""} running — runs your own ${d.agentLabel} locally`
-          : `AI investigations — runs your own ${d.agentLabel} locally`
+        !ready
+          ? "Set up AI investigations — runs your own agent locally"
+          : runningCount > 0
+            ? `${runningCount} investigation${runningCount > 1 ? "s" : ""} running — runs your own ${d.agentLabel} locally`
+            : `AI investigations — runs your own ${d.agentLabel} locally`
       }
       position="bottom"
     >

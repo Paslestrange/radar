@@ -31,8 +31,18 @@ export interface Target {
 }
 export type DiagnoseView = "home" | "investigation";
 
+// Setup readiness of the local AI-diagnosis feature, derived from the agents API:
+//  - "ready":         an agent is installed and the engine is running (available)
+//  - "needs-install": the feature is supported here but no agent CLI is installed
+//  - "needs-restart": a supported agent is now on PATH but Radar booted before it
+//                     existed (the engine is decided once, at startup)
+//  - "off":           not available in this deployment (proxy/OIDC auth, --no-mcp,
+//                     or an embed host) — no install nudge would help
+export type DiagnoseSetup = "ready" | "needs-install" | "needs-restart" | "off";
+
 interface DiagnoseCtx {
   available: boolean; // an agent CLI is present (button/entry gate)
+  setupState: DiagnoseSetup; // readiness for the setup nudge (see DiagnoseSetup)
   agentLabel: string; // label of the selected agent, e.g. "Claude Code"
   agents: AgentInfo[]; // supported agents detected on PATH (for the picker)
   selectedAgent: string; // name of the chosen backend ("claude"/"codex")
@@ -159,6 +169,7 @@ function writeStored(key: string, value: string) {
 
 export function DiagnoseProvider({ children }: { children: ReactNode }) {
   const [available, setAvailable] = useState(false);
+  const [eligible, setEligible] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [consented, setConsented] = useState<
     Record<ConsentSurface, boolean>
@@ -205,6 +216,7 @@ export function DiagnoseProvider({ children }: { children: ReactNode }) {
       .then((r) => {
         if (!live) return;
         setAvailable(r.enabled);
+        setEligible(!!r.eligible);
         setConsented({
           standard: !!r.consented?.standard,
           cursor: !!r.consented?.cursor,
@@ -262,6 +274,16 @@ export function DiagnoseProvider({ children }: { children: ReactNode }) {
     selectedAgent,
     agents.find((a) => a.name === selectedAgent)?.label,
   );
+
+  // `agents` holds only supported CLIs (filtered on fetch), so a non-empty list
+  // while the engine is off means a drivable agent appeared on PATH after boot.
+  const setupState: DiagnoseSetup = available
+    ? "ready"
+    : !eligible
+      ? "off"
+      : agents.length > 0
+        ? "needs-restart"
+        : "needs-install";
 
   useEffect(() => {
     const onResize = () => setViewportW(window.innerWidth);
@@ -432,6 +454,7 @@ export function DiagnoseProvider({ children }: { children: ReactNode }) {
 
   const value: DiagnoseCtx = {
     available,
+    setupState,
     agentLabel,
     agents,
     selectedAgent,
