@@ -343,6 +343,40 @@ export interface AuditResponse {
   groupedChecks?: Check[]
 }
 
+export type UpgradeReadinessVerdict = 'blocked' | 'review' | 'no_known_blockers' | 'unknown'
+export type UpgradeReadinessLevel = 'blocker' | 'warning'
+
+export interface UpgradeReadinessResourceRef {
+  group?: string
+  kind: string
+  namespace: string
+  name: string
+}
+
+export interface UpgradeReadinessFinding {
+  ruleID: string
+  title: string
+  level: UpgradeReadinessLevel
+  resource: UpgradeReadinessResourceRef
+  managedBy?: UpgradeReadinessResourceRef
+  evidence: { source: 'live'; path: string }
+  appliesFrom: string
+  impact: string
+  remediation: string
+  references: { title: string; url: string }[]
+}
+
+export interface UpgradeReadinessResponse {
+  currentVersion: string
+  targetVersion: string
+  reviewedThrough: string
+  verdict: UpgradeReadinessVerdict
+  summary: { blockers: number; warnings: number; scanned: number }
+  findings: UpgradeReadinessFinding[]
+  coverage: { source: 'live'; state: 'complete' | 'partial' | 'no_access'; unavailableKinds?: string[] }
+  rulesEvaluated: { id: string; title: string; appliesFrom: string }[]
+}
+
 export interface DashboardCertificateHealth {
   total: number
   healthy: number
@@ -431,6 +465,18 @@ export function useAudit(namespaces: string[] = []) {
     staleTime: 30000,
     refetchInterval: AUDIT_REFRESH_INTERVAL_MS,
     placeholderData: (prev) => prev,
+  })
+}
+
+export function useUpgradeReadiness(namespaces: string[] = [], target?: string) {
+  const params = new URLSearchParams()
+  if (namespaces.length > 0) params.set('namespaces', namespaces.join(','))
+  if (target) params.set('target', target)
+  const query = params.toString()
+  return useQuery<UpgradeReadinessResponse>({
+    queryKey: ['upgrade-readiness', namespaces, target ?? 'next'],
+    queryFn: () => fetchJSON(`/upgrade-readiness${query ? `?${query}` : ''}`),
+    staleTime: 30000,
   })
 }
 
