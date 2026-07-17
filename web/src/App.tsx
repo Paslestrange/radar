@@ -222,7 +222,7 @@ function radarPageTitle(pathname: string, search = '', apiResources?: { name: st
     return slash >= 0 && slash < decoded.length - 1 ? decoded.slice(slash + 1) : decoded
   }
 
-  if (view === 'checks' && pathSegments[1] === 'upgrade') return 'Upgrade readiness'
+  if (view === 'checks' && pathSegments[1] === 'upgrade') return 'Upgrade impact'
 
   // The landing view reads "Overview" rather than "Home" in the tab.
   if (view === 'home') return 'Overview'
