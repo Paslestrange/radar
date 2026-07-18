@@ -17,7 +17,7 @@ import (
 // AllowedNamespaces describes namespace-list scope for *namespaced* resources:
 //
 //   - nil:  user can list namespaced resources cluster-wide (no per-namespace
-//           filter required at read time)
+//     filter required at read time)
 //   - []:   user has no namespace access — every read returns empty
 //   - non-empty: user can read only the listed namespaces
 //
@@ -244,15 +244,22 @@ func DiscoverNamespaces(ctx context.Context, client kubernetes.Interface, userna
 // user can perform an action. This uses the ServiceAccount's permissions to check
 // on behalf of the user.
 func SubjectCanI(ctx context.Context, client kubernetes.Interface, username string, groups []string, namespace, group, resource, verb string) (bool, error) {
+	return SubjectCanISubresource(ctx, client, username, groups, namespace, group, resource, "", verb)
+}
+
+// SubjectCanISubresource performs the same impersonated authorization check
+// for an exact resource/subresource tuple such as nodes/proxy.
+func SubjectCanISubresource(ctx context.Context, client kubernetes.Interface, username string, groups []string, namespace, group, resource, subresource, verb string) (bool, error) {
 	review := &authv1.SubjectAccessReview{
 		Spec: authv1.SubjectAccessReviewSpec{
 			User:   username,
 			Groups: groups,
 			ResourceAttributes: &authv1.ResourceAttributes{
-				Namespace: namespace,
-				Group:     group,
-				Resource:  resource,
-				Verb:      verb,
+				Namespace:   namespace,
+				Group:       group,
+				Resource:    resource,
+				Subresource: subresource,
+				Verb:        verb,
 			},
 		},
 	}
