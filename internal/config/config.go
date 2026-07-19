@@ -36,7 +36,8 @@ type Config struct {
 	// DebugImage is the image used for ephemeral debug containers and node debug
 	// pods. Empty falls back to busybox:latest; set it to a reachable mirror for
 	// air-gapped / private-registry clusters.
-	DebugImage string `json:"debugImage,omitempty"`
+	DebugImage       string `json:"debugImage,omitempty"`
+	IGGadgetRegistry string `json:"igGadgetRegistry,omitempty"`
 	// ArgoCDURL is the Argo CD API server URL. Empty enables auto-discovery.
 	ArgoCDURL string `json:"argoCdUrl,omitempty"`
 	// ArgoCDToken is the Argo CD API bearer token. Stored in plain text in

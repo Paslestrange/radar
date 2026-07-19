@@ -79,6 +79,7 @@ func TestRegisteredToolAnnotations(t *testing.T) {
 		"patch_resource":  true,
 		"manage_node":     true,
 	}
+	instrumentTools := map[string]bool{"inspect_pod_runtime": true}
 
 	seenWriteTools := map[string]bool{}
 	for _, tool := range tools {
@@ -95,6 +96,15 @@ func TestRegisteredToolAnnotations(t *testing.T) {
 			}
 			if tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
 				t.Errorf("write tool %q should set destructiveHint=true", tool.Name)
+			}
+			continue
+		}
+		if instrumentTools[tool.Name] {
+			if tool.Annotations.ReadOnlyHint {
+				t.Errorf("instrumentation tool %q should not set readOnlyHint=true", tool.Name)
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Errorf("instrumentation tool %q should set destructiveHint=false", tool.Name)
 			}
 			continue
 		}
@@ -116,7 +126,7 @@ func TestRegisteredToolAnnotations(t *testing.T) {
 // writeToolNames is the mutating tool set the read-only mount must exclude.
 var writeToolNames = []string{
 	"manage_workload", "manage_cronjob", "manage_gitops",
-	"apply_resource", "patch_resource", "manage_node",
+	"apply_resource", "patch_resource", "manage_node", "inspect_pod_runtime",
 }
 
 // TestReadOnlyServerExcludesWriteTools is the load-bearing guarantee of the
