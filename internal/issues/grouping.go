@@ -18,6 +18,10 @@ func RelatedIssues(p Provider, namespaces []string, group, kind, namespace, name
 	// not the grouped issue's inline Members (capped at maxInlineMembers) — is
 	// what makes member #11..#N in a large fan-out resolve correctly.
 	flat := Compose(p, Filters{Namespaces: namespaces, Limit: NoLimit})
+	// Mirror the cluster grouped path's sidecar rollup: a stuck child Job must
+	// resolve to its CronJob root here too, or diagnosing the Job returns the
+	// bare "no completions" row without the sidecar remediation.
+	flat = rollupStuckJobsUnderSidecarCronJob(flat, p)
 	grouped := GroupIssues(flat)
 	// Run the grouped-mode enrichment (mirrors the cluster path) so the grouped
 	// issues get coverage-gated incident_parent pointers — GroupIssues alone only
