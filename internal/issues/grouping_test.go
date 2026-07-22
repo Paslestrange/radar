@@ -293,6 +293,26 @@ func TestRelatedIssues_StuckJobResolvesToSidecarCronJobRoot(t *testing.T) {
 	}
 }
 
+// TestComposeForRelatedIssues_CarriesSidecarRollup pins the shared precompose
+// entry used by compose-once/match-many callers (the GitOps insights resolver):
+// the pair it returns must carry the sidecar rollup, so a stuck child Job
+// resolves to the CronJob root there too — not only through RelatedIssues.
+func TestComposeForRelatedIssues_CarriesSidecarRollup(t *testing.T) {
+	owner := Ref{Group: "batch", Kind: "CronJob", Namespace: "ns", Name: "archive"}
+	p := &fakeProvider{
+		problems: []k8s.Detection{
+			{Kind: "CronJob", Group: "batch", Namespace: "ns", Name: "archive", Severity: "warning", Reason: "SidecarBlocksJobCompletion", Action: "fix the sidecar", Fingerprint: "job-sidecar-block:ns:archive", DurationSeconds: 600},
+			{Kind: "Job", Group: "batch", Namespace: "ns", Name: "archive-1", Severity: "high", Reason: "Running for 2h with no completions", DurationSeconds: 7200},
+		},
+		jobCronJobOwner: map[string]Ref{"ns/archive-1": owner},
+	}
+	flat, grouped := ComposeForRelatedIssues(p, nil)
+	got := RelatedIssuesFrom(flat, grouped, "batch", "Job", "ns", "archive-1")
+	if len(got) != 1 || got[0].Kind != "CronJob" || got[0].Reason != "SidecarBlocksJobCompletion" || got[0].Action != "fix the sidecar" {
+		t.Fatalf("precomposed pair lost the sidecar rollup: %+v", got)
+	}
+}
+
 // TestRelatedIssues_PopulatesIncidentParent pins that the per-resource path runs
 // the grouped-mode enrichment, so a symptom returned for the drawer / get_resource
 // / diagnose carries the symptom→root incident_parent (not just the forward links).

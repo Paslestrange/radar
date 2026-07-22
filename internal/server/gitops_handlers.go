@@ -855,8 +855,7 @@ func (r *insightsResolver) ResourceProblems(group, kind, namespace, name string)
 		return nil
 	}
 	r.composeOnce.Do(func() {
-		r.composedFlat = issues.Compose(issues.NewCacheProvider(), issues.Filters{Namespaces: r.allowedNamespaces, Limit: issues.NoLimit})
-		r.composedGrouped = issues.GroupIssues(r.composedFlat)
+		r.composedFlat, r.composedGrouped = issues.ComposeForRelatedIssues(issues.NewCacheProvider(), r.allowedNamespaces)
 	})
 	related := issues.RelatedIssuesFrom(r.composedFlat, r.composedGrouped, group, kind, namespace, name)
 	out := make([]gitopsinsights.ResourceProblem, 0, len(related))
