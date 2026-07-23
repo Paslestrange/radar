@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
@@ -433,6 +434,9 @@ func (s *Server) buildAIResourceContext(r *http.Request, obj runtime.Object, kin
 		AppReferences: resourcecontextrefs.AppReferencesFromEnvChecks(
 			k8s.FindEnvServiceRefChecksForObject(cache, obj),
 			k8s.FindDuplicateEnvVarsForObject(obj),
+		),
+		RunningPastCompletion: resourcecontextrefs.RunningPastCompletionFromShape(
+			k8s.FindRunningPastCompletionForObject(cache, obj, time.Now()),
 		),
 		ServiceBackends: serviceBackendLookup{cache: cache},
 	}

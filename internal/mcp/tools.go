@@ -1119,6 +1119,9 @@ func buildMCPResourceContext(ctx context.Context, obj runtime.Object, kind, name
 			k8s.FindEnvServiceRefChecksForObject(cache, obj),
 			k8s.FindDuplicateEnvVarsForObject(obj),
 		),
+		RunningPastCompletion: resourcecontextrefs.RunningPastCompletionFromShape(
+			k8s.FindRunningPastCompletionForObject(cache, obj, time.Now()),
+		),
 		ServiceBackends: mcpServiceBackendLookup{cache: cache},
 	}
 
