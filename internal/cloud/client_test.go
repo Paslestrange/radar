@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -48,7 +49,7 @@ func TestRunEscalationUsesTheAnsweredHandshakeWording(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prevOut, prevFlags := log.Writer(), log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
@@ -92,4 +93,24 @@ func TestRunEscalationUsesTheAnsweredHandshakeWording(t *testing.T) {
 	if !strings.Contains(got, "403") {
 		t.Fatalf("Run's escalation dropped the status the handshake returned:\n%s", got)
 	}
+}
+
+// syncBuffer is a log sink the test goroutine can read while Run writes to it
+// from its own. bytes.Buffer alone races here, and the race detector is not in
+// CI to catch it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
