@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -126,9 +127,11 @@ func TestHandshakeRejectionErrorOnlyBlamesTheTokenOn401(t *testing.T) {
 			wantContains: []string{"401", "--cloud-token"},
 		},
 		{
-			name:         "403 points at the path, not the token",
-			status:       http.StatusForbidden,
-			wantContains: []string{"403", "was not checked", "proxy"},
+			name:   "403 corrects the reader and points at the path",
+			status: http.StatusForbidden,
+			// The correction is load-bearing: naming 401 as how a bad token
+			// actually comes back is what stops a token rotation here.
+			wantContains: []string{"403", "401", "proxy or gateway in front"},
 			forbidsToken: true,
 		},
 		{
@@ -179,5 +182,97 @@ func TestHandshakeRejectionErrorKeepsTheDialErrorWhenItAddsSomething(t *testing.
 	}
 	if !errors.Is(handshakeRejectionError(http.StatusTeapot, dialErr), dialErr) {
 		t.Fatal("unexpected status dropped the underlying dial error")
+	}
+}
+
+// TestDialAttributesTheAnswerItGot drives the real dial path. The table test
+// above only exercises the helper, so without this the whole mapping can be
+// reverted in dial() and the package still passes.
+func TestDialAttributesTheAnswerItGot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		status  int
+		want    string
+		notWant []string
+	}{
+		{
+			name:   "401 names the token",
+			status: http.StatusUnauthorized,
+			want:   "--cloud-token",
+		},
+		{
+			name:    "403 sends them to the path in front",
+			status:  http.StatusForbidden,
+			want:    "proxy or gateway in front",
+			notWant: []string{"revoked", "rejected the cluster token"},
+		},
+		{
+			name:    "503 is not a rejection",
+			status:  http.StatusServiceUnavailable,
+			want:    "was not rejected",
+			notWant: []string{"revoked", "rejected the cluster token"},
+		},
+		{
+			// A server may answer any three-digit status; net/http accepts it.
+			// The 5xx branch's upper bound is what keeps this out of "service
+			// or network failure", so it has to be exercised.
+			name:    "a status above 5xx stays unattributed",
+			status:  699,
+			want:    "unexpected answer",
+			notWant: []string{"was not rejected", "revoked"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			defer srv.Close()
+
+			_, err := dial(context.Background(), Config{
+				URL:       "ws://" + srv.Listener.Addr().String() + "/agent",
+				Token:     "rhc_test",
+				ClusterID: "c1",
+				Handler:   http.NewServeMux(),
+			}, false)
+			if err == nil {
+				t.Fatalf("status %d: dial succeeded", tt.status)
+			}
+
+			var answered *handshakeStatusError
+			if !errors.As(err, &answered) {
+				t.Fatalf("status %d: error is not marked as an answered handshake: %v", tt.status, err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("status %d: %q does not mention %q", tt.status, err, tt.want)
+			}
+			for _, banned := range tt.notWant {
+				if strings.Contains(err.Error(), banned) {
+					t.Fatalf("status %d: %q claims %q", tt.status, err, banned)
+				}
+			}
+		})
+	}
+}
+
+// TestDialLeavesAnUnansweredHandshakeUnmarked pins the other half: a dial that
+// never reached a server must NOT look like an answered handshake, or the
+// escalation drops the flag guidance in the one case that needs it.
+func TestDialLeavesAnUnansweredHandshakeUnmarked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := srv.Listener.Addr().String()
+	srv.Close() // nothing is listening now
+
+	_, err := dial(context.Background(), Config{
+		URL:       "ws://" + addr + "/agent",
+		Token:     "rhc_test",
+		ClusterID: "c1",
+		Handler:   http.NewServeMux(),
+	}, false)
+	if err == nil {
+		t.Fatal("dial to a closed port succeeded")
+	}
+	var answered *handshakeStatusError
+	if errors.As(err, &answered) {
+		t.Fatalf("a refused connection was marked as an answered handshake: %v", err)
 	}
 }

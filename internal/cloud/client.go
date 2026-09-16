@@ -118,7 +118,6 @@ func Run(ctx context.Context, cfg Config) error {
 
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
-	const warnAfterFailures = 5
 
 	failures := 0
 
@@ -175,6 +174,11 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 const selfUpgradeRecheckInterval = 3 * time.Minute
+
+// warnAfterFailures is how many consecutive dial failures escalate to a WARN.
+// A var so a test can reach the escalation without sitting through the
+// backoff that separates five real attempts.
+var warnAfterFailures = 5
 
 // advertisementSession is the slice of *yamux.Session the capability watcher
 // needs; an interface so tests can observe the close decision without a
