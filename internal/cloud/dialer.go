@@ -39,16 +39,7 @@ func dial(ctx context.Context, cfg Config, selfUpgrade bool) (*yamux.Session, er
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()
-			switch resp.StatusCode {
-			case http.StatusUnauthorized:
-				return nil, fmt.Errorf("Radar Cloud rejected token (401) — check --cloud-token")
-			case http.StatusForbidden:
-				return nil, fmt.Errorf("Radar Cloud rejected cluster (403) — token may be revoked or cluster disabled")
-			case http.StatusNotFound:
-				return nil, fmt.Errorf("Radar Cloud endpoint not found (404) — check --cloud-url path")
-			default:
-				return nil, fmt.Errorf("Radar Cloud rejected connection: status=%d: %w", resp.StatusCode, err)
-			}
+			return nil, handshakeRejectionError(resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("ws dial: %w", err)
 	}
@@ -108,3 +99,44 @@ func tunnelYamuxConfig() *yamux.Config {
 	cfg.MaxStreamWindowSize = 4 << 20 // 4MB
 	return cfg
 }
+
+// handshakeRejectionError explains a non-101 answer to the tunnel handshake.
+//
+// Radar Cloud's /agent endpoint answers a handshake with 101, 401 or 500 and
+// nothing else, so 401 is the only status that is a verdict on the cluster
+// token. Every other status was written by something on the path in between,
+// which never saw the token. That distinction is what the wording protects:
+// while Radar Cloud is unreachable its edge answers for it, and blaming the
+// credential there sends an operator to rotate a token that was never in
+// question, during an outage that clears on its own.
+//
+// The 401 and 403 wordings are pinned to that endpoint contract. If Radar
+// Cloud ever starts answering 403 on /agent, this has to move with it.
+func handshakeRejectionError(statusCode int, dialErr error) error {
+	var explained error
+	switch {
+	case statusCode == http.StatusUnauthorized:
+		explained = fmt.Errorf("Radar Cloud rejected the cluster token (401). Check --cloud-token: the token may have been rotated or revoked")
+	case statusCode == http.StatusForbidden:
+		explained = fmt.Errorf("something on the path to Radar Cloud refused the connection (403). Radar Cloud does not answer 403 on its agent endpoint, so the cluster token was not checked. Look at any proxy, gateway or egress policy in front of the Cloud URL")
+	case statusCode == http.StatusNotFound:
+		explained = fmt.Errorf("nothing serves the Radar Cloud agent endpoint at this URL (404). Check --cloud-url")
+	case statusCode >= 500 && statusCode <= 599:
+		explained = fmt.Errorf("Radar Cloud did not complete the handshake (status=%d). The cluster token was not rejected, so this is a service or network failure: %w", statusCode, dialErr)
+	default:
+		explained = fmt.Errorf("unexpected answer to the Radar Cloud handshake (status=%d): %w", statusCode, dialErr)
+	}
+	return &handshakeStatusError{err: explained}
+}
+
+// handshakeStatusError marks a failure where the handshake was answered with
+// an HTTP status, as opposed to never reaching a server at all. Every message
+// above already names what to check, so the reconnect loop suppresses its
+// generic "verify your flags" hint for these.
+type handshakeStatusError struct {
+	err error
+}
+
+func (e *handshakeStatusError) Error() string { return e.err.Error() }
+
+func (e *handshakeStatusError) Unwrap() error { return e.err }

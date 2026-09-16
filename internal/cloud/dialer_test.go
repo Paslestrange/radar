@@ -2,6 +2,9 @@ package cloud
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,5 +105,79 @@ func TestCloudHandshakeHeaders_Release(t *testing.T) {
 	without := cloudHandshakeHeaders(Config{Token: "rhc_test"}, false)
 	if _, ok := without["X-Radar-Release"]; ok {
 		t.Fatal("X-Radar-Release sent with no release configured")
+	}
+}
+
+func TestHandshakeRejectionErrorOnlyBlamesTheTokenOn401(t *testing.T) {
+	// Radar Cloud answers the agent handshake with 101, 401 or 500. Any other
+	// status came from the path in between, which never saw the token, and a
+	// message that blames the credential sends the operator to rotate a token
+	// that was fine.
+	dialErr := errors.New("websocket: bad handshake")
+	for _, tt := range []struct {
+		name         string
+		status       int
+		wantContains []string
+		forbidsToken bool
+	}{
+		{
+			name:         "401 is the token verdict",
+			status:       http.StatusUnauthorized,
+			wantContains: []string{"401", "--cloud-token"},
+		},
+		{
+			name:         "403 points at the path, not the token",
+			status:       http.StatusForbidden,
+			wantContains: []string{"403", "was not checked", "proxy"},
+			forbidsToken: true,
+		},
+		{
+			name:         "404 points at the URL",
+			status:       http.StatusNotFound,
+			wantContains: []string{"404", "--cloud-url"},
+			forbidsToken: true,
+		},
+		{
+			name:         "503 is a service failure",
+			status:       http.StatusServiceUnavailable,
+			wantContains: []string{"503", "was not rejected"},
+			forbidsToken: true,
+		},
+		{
+			name:         "unexpected status stays neutral",
+			status:       http.StatusTeapot,
+			wantContains: []string{"418"},
+			forbidsToken: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := handshakeRejectionError(tt.status, dialErr).Error()
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Fatalf("status %d message %q does not mention %q", tt.status, got, want)
+				}
+			}
+			if tt.forbidsToken {
+				for _, banned := range []string{"revoked", "rejected the cluster token", "cluster disabled"} {
+					if strings.Contains(got, banned) {
+						t.Fatalf("status %d message %q claims %q, but only 401 is a verdict on the token",
+							tt.status, got, banned)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHandshakeRejectionErrorKeepsTheDialErrorWhenItAddsSomething(t *testing.T) {
+	// 401/403/404 are fully explained by the status, so the generic
+	// "bad handshake" adds nothing. Everything else keeps it: it is the only
+	// detail distinguishing one unexpected answer from another.
+	dialErr := errors.New("websocket: bad handshake")
+	if !errors.Is(handshakeRejectionError(http.StatusBadGateway, dialErr), dialErr) {
+		t.Fatal("502 dropped the underlying dial error")
+	}
+	if !errors.Is(handshakeRejectionError(http.StatusTeapot, dialErr), dialErr) {
+		t.Fatal("unexpected status dropped the underlying dial error")
 	}
 }
