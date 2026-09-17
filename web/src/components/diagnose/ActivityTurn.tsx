@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { TW_EASE_UI } from "../../utils/animation";
 import {
   Loader2,
   CheckCircle2,
@@ -573,8 +574,8 @@ function ThinkingBlock({
   const contentId = useId();
   const reveal = useDisclosureReveal<HTMLDivElement>();
   // Two lines of 12px/19.5px prose plus 8px paragraph/container spacing. Unlike a disclosure
-  // this starts with a visible preview, so animate measured height using the
-  // same 200ms ease-out/reduced-motion treatment as Collapse.
+  // this starts with a visible preview, so animate measured height on the
+  // same clock as Collapse (DURATION_DISCLOSURE + the one curve).
   const previewHeight = 47;
   const clamped = !live && !expanded;
   useEffect(() => {
@@ -595,7 +596,7 @@ function ThinkingBlock({
     >
       <div
         id={contentId}
-        className="overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
+        className={`overflow-hidden transition-[height] duration-300 ${TW_EASE_UI} motion-reduce:transition-none`}
         style={{
           height: clamped
             ? Math.min(contentHeight ?? previewHeight, previewHeight)

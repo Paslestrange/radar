@@ -2,6 +2,8 @@ import { useState, useMemo, useRef, useEffect, useCallback, forwardRef, useImper
 import { createPortal } from 'react-dom'
 import { Search, CornerDownLeft, Loader2, AlertTriangle } from 'lucide-react'
 import { clsx } from 'clsx'
+import { useAnimatedUnmount } from '../../hooks/useAnimatedUnmount'
+import { TRANSITION_BACKDROP, TRANSITION_MENU, TW_EASE_UI, overlayExitMs, overlayTransitionStyle } from '../../utils/animation'
 import { SearchPillInput, type SearchModifier } from '@skyhook-io/k8s-ui'
 import { getResourceIcon } from '../../utils/resource-icons'
 import type { SearchHit, SearchMatchedField } from '../../api/client'
@@ -386,8 +388,10 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
   }, [open])
 
   // Track the input's position so the portaled panel stays anchored under it.
+  // The anchor is kept through the exit (clearing it at logical close would
+  // unmount the fading panel) and re-measured on the next open.
   useEffect(() => {
-    if (!open) { setAnchor(null); return }
+    if (!open) return
     const update = () => {
       const el = containerRef.current
       if (!el) return
@@ -406,6 +410,15 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
   const totalMatched = searchData?.total_matched ?? 0
   const hasNsPill = pills.some((p) => p.key === 'ns')
   const dropdownOpen = open && !suggesting && (rows.length > 0 || searchActive)
+  // Presence: the scrim and the results panel are menu-kind overlays (140ms
+  // in / 100ms out) and stay mounted through their exit. What the panel was
+  // showing at logical close is what fades out — `dropdownOpen` drops with
+  // `open`, so the last open-frame value is retained for the exit.
+  const portalShown = open && (dropdownOpen || suggesting)
+  const portal = useAnimatedUnmount(portalShown, overlayExitMs('menu'))
+  const panelWasOpen = useRef(dropdownOpen)
+  if (open) panelWasOpen.current = dropdownOpen
+  const showPanel = open ? dropdownOpen : panelWasOpen.current
 
   const clearNsPills = () => { setPills((prev) => prev.filter((p) => p.key !== 'ns')); inputRef.current?.focus() }
 
@@ -422,8 +435,8 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
     >
       <SearchPillInput
         className={hero
-          ? 'min-h-14 px-5 rounded-2xl bg-theme-surface border border-theme-border shadow-theme-sm transition-colors focus-within:border-[var(--color-brand-500)] focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand-500)_15%,transparent)]'
-          : 'min-h-8 px-2.5 rounded-md bg-theme-elevated border border-transparent focus-within:border-theme-border focus-within:bg-theme-surface transition-colors'}
+          ? `min-h-14 px-5 rounded-2xl bg-theme-surface border border-theme-border shadow-theme-sm transition-[color,background-color,border-color,box-shadow] duration-[140ms] ${TW_EASE_UI} focus-within:border-[var(--color-brand-500)] focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand-500)_15%,transparent)]`
+          : `min-h-8 px-2.5 rounded-md bg-theme-elevated border border-transparent focus-within:border-theme-border focus-within:bg-theme-surface transition-[color,background-color,border-color] duration-[140ms] ${TW_EASE_UI}`}
         inputClassName={hero ? 'text-lg py-4' : undefined}
         text={text}
         pills={pills}
@@ -448,7 +461,7 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
         }
       />
 
-      {open && anchor && (dropdownOpen || suggesting) && createPortal(
+      {portal.shouldRender && anchor && createPortal(
         <>
           {/* Scrim — separates the dropdown from the page, consistently in both
               modes. At z-[15] it sits BELOW the rail/top bar (z-20/30), so the
@@ -459,15 +472,25 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
               top-bar launcher covers from below the field (its box is already in
               the z-20 chrome). Click closes. */}
           <div
-            className="fixed left-0 right-0 bottom-0 z-[15] bg-black/15 dark:bg-black/50 backdrop-blur-[3px]"
-            style={{ top: hero ? 0 : anchor.top }}
-            onClick={() => { setOpen(false); inputRef.current?.blur() }}
+            className={clsx(
+              'fixed left-0 right-0 bottom-0 z-[15] bg-black/15 dark:bg-black/50 backdrop-blur-[3px]',
+              TRANSITION_BACKDROP,
+              portal.isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none',
+            )}
+            style={{ top: hero ? 0 : anchor.top, ...overlayTransitionStyle(portal.isOpen, 'menu') }}
+            onClick={open ? () => { setOpen(false); inputRef.current?.blur() } : undefined}
           />
-          {dropdownOpen && (
+          {showPanel && (
           <div
             ref={panelRef}
-            style={{ position: 'fixed', top: anchor.top + 8, left: anchor.centerX, transform: 'translateX(-50%)', width: hero ? Math.round(anchor.width) : 640, maxWidth: 'calc(100vw - 2rem)' }}
-            className="z-[121] dialog shadow-theme-lg ring-1 ring-black/5 dark:ring-white/10 overflow-hidden"
+            inert={!open || undefined}
+            style={{ position: 'fixed', top: anchor.top + 8, left: anchor.centerX, transform: 'translateX(-50%)', width: hero ? Math.round(anchor.width) : 640, maxWidth: 'calc(100vw - 2rem)', ...overlayTransitionStyle(portal.isOpen, 'menu') }}
+            className={clsx(
+              'z-[121] dialog shadow-theme-lg ring-1 ring-black/5 dark:ring-white/10 overflow-hidden origin-top',
+              TRANSITION_MENU,
+              portal.isOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-1 scale-[0.97]',
+              !open && 'pointer-events-none',
+            )}
           >
           <div ref={listRef} className="max-h-[60vh] overflow-y-auto py-1">
             {recentRows.length > 0 && (

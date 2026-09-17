@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { TW_EASE_UI } from "../../utils/animation";
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentControls,
@@ -349,8 +350,9 @@ describe("Timeline reasoning density", () => {
     );
 
     expect(html).toContain("height:47px");
+    // The clamp animates on the shared disclosure clock, not a local timing.
     expect(html).toContain(
-      "transition-[height] duration-200 ease-out motion-reduce:transition-none",
+      `transition-[height] duration-300 ${TW_EASE_UI} motion-reduce:transition-none`,
     );
     expect(html).not.toContain("animate-transcript-enter");
     expect(html).not.toContain("Show reasoning");
