@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Search, CornerDownLeft, Loader2, AlertTriangle } from 'lucide-react'
 import { clsx } from 'clsx'
@@ -424,74 +424,12 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
 
   const hero = size === 'hero'
 
-  return (
-    <div
-      ref={containerRef}
-      className={clsx('relative w-full', hero ? 'max-w-3xl' : 'max-w-lg', open && hero && 'z-[16]')}
-      // Open on click even when the field is already focused — onFocus alone
-      // never fires again, so an autofocused hero (Home) wouldn't reveal the
-      // launcher on a click.
-      onMouseDown={() => setOpen(true)}
-    >
-      <SearchPillInput
-        className={hero
-          ? `min-h-14 px-5 rounded-2xl bg-theme-surface border border-theme-border shadow-theme-sm transition-[color,background-color,border-color,box-shadow] duration-[140ms] ${TW_EASE_UI} focus-within:border-[var(--color-brand-500)] focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand-500)_15%,transparent)]`
-          : `min-h-8 px-2.5 rounded-md bg-theme-elevated border border-transparent focus-within:border-theme-border focus-within:bg-theme-surface transition-[color,background-color,border-color] duration-[140ms] ${TW_EASE_UI}`}
-        inputClassName={hero ? 'text-lg py-4' : undefined}
-        text={text}
-        pills={pills}
-        onChange={({ text: t, pills: p }) => { setText(t); setPills(p); setOpen(true) }}
-        onKeyDown={handleKeyDown}
-        onFocus={() => { if (skipFocusOpen.current) { skipFocusOpen.current = false; return } setOpen(true) }}
-        onSuggestingChange={setSuggesting}
-        modifierOptions={modifierOptions}
-        placeholder={placeholder}
-        aria-label="Search resources and commands"
-        inputRef={inputRef}
-        leftSlot={<Search className={hero ? 'w-5 h-5 shrink-0 text-theme-text-tertiary' : 'w-3.5 h-3.5 shrink-0 text-theme-text-tertiary'} />}
-        rightSlot={
-          <div className="flex items-center gap-1.5 shrink-0">
-            <SearchSyntaxHelp />
-            {!hero && !text && pills.length === 0 && (
-              <kbd className="text-[10px] text-theme-text-tertiary bg-theme-surface px-1 py-0.5 rounded border border-theme-border-light">
-                {mac ? '⌘' : 'Ctrl+'}K
-              </kbd>
-            )}
-          </div>
-        }
-      />
-
-      {portal.shouldRender && anchor && createPortal(
-        <>
-          {/* Scrim — separates the dropdown from the page, consistently in both
-              modes. At z-[15] it sits BELOW the rail/top bar (z-20/30), so the
-              nav chrome stays lit while the content behind the panel dims+blurs:
-              a "spotlight on search", not a full-screen modal dim (which fits a
-              centered command palette, not an anchored omnibar). The hero covers
-              from the top (its box is in the content, lifted to z-[16]); the
-              top-bar launcher covers from below the field (its box is already in
-              the z-20 chrome). Click closes. */}
-          <div
-            className={clsx(
-              'fixed left-0 right-0 bottom-0 z-[15] bg-black/15 dark:bg-black/50 backdrop-blur-[3px]',
-              TRANSITION_BACKDROP,
-              portal.isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none',
-            )}
-            style={{ top: hero ? 0 : anchor.top, ...overlayTransitionStyle(portal.isOpen, 'menu') }}
-            onClick={open ? () => { setOpen(false); inputRef.current?.blur() } : undefined}
-          />
-          {showPanel && (
-          <div
-            ref={panelRef}
-            inert={!open || undefined}
-            style={{ position: 'fixed', top: anchor.top + 8, left: anchor.centerX, transform: 'translateX(-50%)', width: hero ? Math.round(anchor.width) : 640, maxWidth: 'calc(100vw - 2rem)', ...overlayTransitionStyle(portal.isOpen, 'menu') }}
-            className={clsx(
-              'z-[121] dialog shadow-theme-lg ring-1 ring-black/5 dark:ring-white/10 overflow-hidden origin-top',
-              TRANSITION_MENU,
-              portal.isOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-1 scale-[0.97]',
-              !open && 'pointer-events-none',
-            )}
-          >
+  // The results panel keeps showing what it showed at logical close while it
+  // fades: picking a result clears the query (and recents re-key off `open`)
+  // on the same render, and a panel that swaps to a different list mid-exit
+  // reads as a glitch. The last open-frame content is frozen for the exit.
+  const panelContent = (
+    <>
           <div ref={listRef} className="max-h-[60vh] overflow-y-auto py-1">
             {recentRows.length > 0 && (
               <div>
@@ -572,6 +510,81 @@ export const Omnibar = forwardRef<OmnibarHandle, OmnibarProps>(function Omnibar(
             <span>⇞⇟ page</span>
             <span>esc close</span>
           </div>
+    </>
+  )
+  const frozenPanel = useRef<ReactNode>(null)
+  if (open) frozenPanel.current = panelContent
+  const shownPanel = open ? panelContent : frozenPanel.current
+
+  return (
+    <div
+      ref={containerRef}
+      className={clsx('relative w-full', hero ? 'max-w-3xl' : 'max-w-lg', portal.shouldRender && hero && 'z-[16]')}
+      // Open on click even when the field is already focused — onFocus alone
+      // never fires again, so an autofocused hero (Home) wouldn't reveal the
+      // launcher on a click.
+      onMouseDown={() => setOpen(true)}
+    >
+      <SearchPillInput
+        className={hero
+          ? `min-h-14 px-5 rounded-2xl bg-theme-surface border border-theme-border shadow-theme-sm transition-[color,background-color,border-color,box-shadow] duration-[140ms] ${TW_EASE_UI} focus-within:border-[var(--color-brand-500)] focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand-500)_15%,transparent)]`
+          : `min-h-8 px-2.5 rounded-md bg-theme-elevated border border-transparent focus-within:border-theme-border focus-within:bg-theme-surface transition-[color,background-color,border-color] duration-[140ms] ${TW_EASE_UI}`}
+        inputClassName={hero ? 'text-lg py-4' : undefined}
+        text={text}
+        pills={pills}
+        onChange={({ text: t, pills: p }) => { setText(t); setPills(p); setOpen(true) }}
+        onKeyDown={handleKeyDown}
+        onFocus={() => { if (skipFocusOpen.current) { skipFocusOpen.current = false; return } setOpen(true) }}
+        onSuggestingChange={setSuggesting}
+        modifierOptions={modifierOptions}
+        placeholder={placeholder}
+        aria-label="Search resources and commands"
+        inputRef={inputRef}
+        leftSlot={<Search className={hero ? 'w-5 h-5 shrink-0 text-theme-text-tertiary' : 'w-3.5 h-3.5 shrink-0 text-theme-text-tertiary'} />}
+        rightSlot={
+          <div className="flex items-center gap-1.5 shrink-0">
+            <SearchSyntaxHelp />
+            {!hero && !text && pills.length === 0 && (
+              <kbd className="text-[10px] text-theme-text-tertiary bg-theme-surface px-1 py-0.5 rounded border border-theme-border-light">
+                {mac ? '⌘' : 'Ctrl+'}K
+              </kbd>
+            )}
+          </div>
+        }
+      />
+
+      {portal.shouldRender && anchor && createPortal(
+        <>
+          {/* Scrim — separates the dropdown from the page, consistently in both
+              modes. At z-[15] it sits BELOW the rail/top bar (z-20/30), so the
+              nav chrome stays lit while the content behind the panel dims+blurs:
+              a "spotlight on search", not a full-screen modal dim (which fits a
+              centered command palette, not an anchored omnibar). The hero covers
+              from the top (its box is in the content, lifted to z-[16]); the
+              top-bar launcher covers from below the field (its box is already in
+              the z-20 chrome). Click closes. */}
+          <div
+            className={clsx(
+              'fixed left-0 right-0 bottom-0 z-[15] bg-black/15 dark:bg-black/50 backdrop-blur-[3px]',
+              TRANSITION_BACKDROP,
+              portal.isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none',
+            )}
+            style={{ top: hero ? 0 : anchor.top, ...overlayTransitionStyle(portal.isOpen, 'menu') }}
+            onClick={open ? () => { setOpen(false); inputRef.current?.blur() } : undefined}
+          />
+          {showPanel && (
+          <div
+            ref={panelRef}
+            inert={!open || undefined}
+            style={{ position: 'fixed', top: anchor.top + 8, left: anchor.centerX, transform: 'translateX(-50%)', width: hero ? Math.round(anchor.width) : 640, maxWidth: 'calc(100vw - 2rem)', ...overlayTransitionStyle(portal.isOpen, 'menu') }}
+            className={clsx(
+              'z-[121] dialog shadow-theme-lg ring-1 ring-black/5 dark:ring-white/10 overflow-hidden origin-top',
+              TRANSITION_MENU,
+              portal.isOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-1 scale-[0.97]',
+              !open && 'pointer-events-none',
+            )}
+          >
+          {shownPanel}
           </div>
           )}
         </>,
