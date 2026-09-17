@@ -1,5 +1,3 @@
-import { prettyTool } from "./parts";
-
 // One readable sentence for a tool call in flight, from the call's arguments:
 // "Reading logs for pod shop/api-7d4 / api" tells the reader what the agent
 // is looking at; "Get Pod Logs" tells them which tool ran.
@@ -132,4 +130,45 @@ function kindLabel(kind: string | undefined): string | undefined {
 function pluralLabel(kind: string): string {
   const base = kindLabel(kind) ?? kind;
   return base.endsWith("s") ? base : `${base}s`;
+}
+
+export function prettyTool(tool: string): string {
+  return tool.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const THINKING_AFTER_MS = 8000;
+
+/**
+ * The Assessment card's running row: the call in flight or just finished on
+ * the left, the read count and the timer on the right. A finished call keeps
+ * its name for a few quiet seconds, then the label admits the agent is
+ * thinking rather than showing a stale read.
+ */
+export function investigationRunningLabel({
+  lastTool,
+  reads,
+  quietFor,
+  elapsedSeconds,
+}: {
+  lastTool?: { tool?: string; status?: string; summary?: string };
+  reads: number;
+  quietFor: number;
+  elapsedSeconds: number;
+}): { current: string; meta: string } {
+  let current = "Investigating";
+  if (lastTool?.tool) {
+    current =
+      lastTool.status === "running" || quietFor < THINKING_AFTER_MS
+        ? describeToolCall(lastTool.tool, lastTool.summary)
+        : "Thinking";
+  }
+  return {
+    current: `${current}…`,
+    meta: [
+      reads > 0 ? `${reads} ${reads === 1 ? "read" : "reads"}` : undefined,
+      elapsedSeconds >= 2 ? `${elapsedSeconds} s` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  };
 }
