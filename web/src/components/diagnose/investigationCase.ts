@@ -33,6 +33,8 @@ export interface InvestigationCaseItem {
   index: number;
   role: DiagnosisEvidenceRole;
   claim: string;
+  /** What the agent says this result does not cover. */
+  gap?: string;
   subject?: DiagnosisEvidenceSubject;
   source: InvestigationEvidenceSource;
   placement: InvestigationCasePlacement;
@@ -49,65 +51,6 @@ export interface InvestigationCaseRuledOut {
 export interface InvestigationCaseResolution {
   items: InvestigationCaseItem[];
   ruledOut: InvestigationCaseRuledOut[];
-}
-
-/**
- * Notes the agent put on cards in earlier assessments stay on those cards
- * when a later turn takes over the pane's case, unless the later turn
- * addressed the same card; a follow-up about one chart must not strip the
- * initial assessment's reading from everything else. Ordering and the
- * ruled-out list follow the live turn alone, and source-placed notes stay
- * listed under their own assessment. `earlier` is newest first.
- */
-export function mergeInvestigationCases(
-  live: InvestigationCaseResolution | undefined,
-  earlier: readonly (InvestigationCaseResolution | undefined)[],
-): InvestigationCaseResolution | undefined {
-  const liveItems = live?.items ?? [];
-  const covered = new Set(
-    liveItems.flatMap((item) => (item.groupId ? [item.groupId] : [])),
-  );
-  const carried: InvestigationCaseItem[] = [];
-  for (const resolution of earlier) {
-    // The newest assessment that spoke about a group wins it outright, and it
-    // wins with everything it said: a card note and a pinned revision note are
-    // two readings of one group, not rivals. Coverage is therefore taken after
-    // the whole resolution, not as each of its items is carried.
-    const takenHere = new Set<string>();
-    for (const item of resolution?.items ?? []) {
-      if (item.placement === "source" || !item.groupId) continue;
-      if (covered.has(item.groupId)) continue;
-      takenHere.add(item.groupId);
-      carried.push(item);
-    }
-    for (const groupId of takenHere) covered.add(groupId);
-  }
-  if (carried.length === 0) return live;
-  return { items: [...liveItems, ...carried], ruledOut: live?.ruledOut ?? [] };
-}
-
-/**
- * The subset of one assessment's items that survived into the case the pane
- * actually renders. Matching is by value, not object identity: the merge is
- * fed freshly resolved copies of every turn, so an identity test would report
- * that an assessment's own note had vanished the moment any other turn was
- * re-resolved.
- */
-export function investigationCaseItemsStillRendered(
-  assessmentItems: readonly InvestigationCaseItem[] | undefined,
-  renderedItems: readonly InvestigationCaseItem[] | undefined,
-): InvestigationCaseItem[] {
-  if (!assessmentItems?.length || !renderedItems?.length) return [];
-  const key = (item: InvestigationCaseItem) =>
-    [
-      item.index,
-      item.source.id,
-      item.placement,
-      item.groupId ?? "",
-      item.observation ? investigationCaseObservationKey(item.observation) : "",
-    ].join("\u0000");
-  const rendered = new Set(renderedItems.map(key));
-  return assessmentItems.filter((item) => rendered.has(key(item)));
 }
 
 /**
@@ -134,10 +77,12 @@ export function investigationCaseObservationKey(
 
 /**
  * Resolves the agent's case for one assessment. Refs are re-validated against
- * the assessment turn exactly like root-cause refs; an item whose ref does not
- * resolve is dropped on its own. Placement follows the observation the
- * (ref, subject) pair names: exactly one match pins the claim to that
- * observation, anything else falls back to the source row.
+ * the run up to and including the assessment turn, exactly like root-cause
+ * refs — a revised assessment may rest on a result read in an earlier turn,
+ * and the observation it resolves to is that earlier read, never a later one.
+ * An item whose ref does not resolve is dropped on its own. Placement follows
+ * the observation the (ref, subject) pair names: exactly one match pins the
+ * claim to that observation, anything else falls back to the source row.
  */
 export function resolveInvestigationCase(
   projection: InvestigationEvidenceProjection,
@@ -149,17 +94,17 @@ export function resolveInvestigationCase(
 ): InvestigationCaseResolution {
   const evidence = diagnosis?.evidence ?? [];
   if (evidence.length === 0) return { items: [], ruledOut: [] };
+  const targetPods = new Set(projection.targetPods);
   const byRef = new Map<string, InvestigationEvidenceSource[]>();
   for (const source of projection.evidenceRefSources) {
-    if (source.turnIndex !== assessmentTurnIndex || !source.evidenceRef)
-      continue;
+    if (source.turnIndex > assessmentTurnIndex || !source.evidenceRef) continue;
     const matches = byRef.get(source.evidenceRef) ?? [];
     matches.push(source);
     byRef.set(source.evidenceRef, matches);
   }
   const citableSourceIds = new Set(
     projection.citableSources
-      .filter((source) => source.turnIndex === assessmentTurnIndex)
+      .filter((source) => source.turnIndex <= assessmentTurnIndex)
       .map((source) => source.id),
   );
   const items: InvestigationCaseItem[] = [];
@@ -188,6 +133,9 @@ export function resolveInvestigationCase(
       index,
       role: entry.role,
       claim: typeof entry.claim === "string" ? entry.claim.trim() : "",
+      ...(typeof entry.gap === "string" && entry.gap.trim()
+        ? { gap: entry.gap.trim() }
+        : {}),
       ...(subject ? { subject } : {}),
       source,
       placement: "source",
@@ -200,7 +148,12 @@ export function resolveInvestigationCase(
               (observation) =>
                 observation.source.id === source.id &&
                 (!subject ||
-                  observationMatchesSubject(group, observation, subject)),
+                  observationMatchesSubject(
+                    group,
+                    observation,
+                    subject,
+                    targetPods,
+                  )),
             )
             .map((observation) => ({ group, observation })),
         );
@@ -241,11 +194,11 @@ export function resolveInvestigationCase(
 function validCaseSubject(
   value: DiagnosisEvidenceSubject | undefined,
 ): DiagnosisEvidenceSubject | undefined {
-  if (!value || !nonEmptyString(value.kind) || !nonEmptyString(value.name))
-    return undefined;
+  if (!value || !nonEmptyString(value.kind)) return undefined;
   const optional = (field: unknown) =>
     field === undefined || typeof field === "string";
   if (
+    !optional(value.name) ||
     !optional(value.group) ||
     !optional(value.namespace) ||
     !optional(value.container) ||
@@ -268,6 +221,8 @@ interface ObservationSubjectIdentity {
   name: string;
   container?: string;
   stream?: "current" | "previous";
+  /** A listing names a kind (and scope) but no single object. */
+  listing?: boolean;
 }
 
 /**
@@ -319,17 +274,44 @@ function observationSubjectIdentity(
     };
   }
   const args = investigationSourceArgs(observation.source);
-  if (!args || !nonEmptyString(args.kind) || !nonEmptyString(args.name))
-    return undefined;
+  // A listing whose call names no kind (list_namespaces) is still a listing
+  // of the one kind its rows carry.
+  if (data.type === "inventory" && !nonEmptyString(args?.kind)) {
+    const kinds = new Set(data.resources.map((resource) => resource.kind));
+    if (kinds.size !== 1) return undefined;
+    return {
+      kind: [...kinds][0],
+      namespace: nonEmptyString(args?.namespace) ? args.namespace : undefined,
+      name: "",
+      listing: true,
+    };
+  }
+  if (!args || !nonEmptyString(args.kind)) return undefined;
   return {
     kind: args.kind,
     group: nonEmptyString(args.group) ? args.group : undefined,
     namespace: nonEmptyString(args.namespace) ? args.namespace : undefined,
-    name: args.name,
+    name: nonEmptyString(args.name) ? args.name : "",
+    ...(nonEmptyString(args.name) ? {} : { listing: true }),
   };
 }
 
-function sameKind(left: string, right: string): boolean {
+// No CRD lives in a built-in API group: the core group under its three
+// spellings, the four legacy unsuffixed groups, or any group under k8s.io.
+const LEGACY_BUILT_IN_GROUPS = new Set([
+  "",
+  "core",
+  "v1",
+  "apps",
+  "batch",
+  "autoscaling",
+  "policy",
+]);
+function isBuiltInGroup(group: string): boolean {
+  return LEGACY_BUILT_IN_GROUPS.has(group) || group.endsWith(".k8s.io");
+}
+
+export function sameKind(left: string, right: string): boolean {
   return pluralToKind(left).toLowerCase() === pluralToKind(right).toLowerCase();
 }
 
@@ -342,6 +324,7 @@ function observationMatchesSubject(
   group: InvestigationEvidenceGroup,
   observation: InvestigationEvidenceObservation,
   subject: DiagnosisEvidenceSubject,
+  targetPods: ReadonlySet<string>,
 ): boolean {
   if (subject.observation !== undefined) {
     // A diagnose bundle captures several vitals charts for one resource, so
@@ -349,7 +332,10 @@ function observationMatchesSubject(
     // whose identity ends in that category. An agent-run query is one chart,
     // so a qualifier on it carries no meaning.
     const [kind, qualifier] = subject.observation.toLowerCase().split(":", 2);
-    if (kind !== observation.data.type) return false;
+    // A listing is resources too: "resource" names an inventory card as well.
+    const inventoryAsResource =
+      kind === "resource" && observation.data.type === "inventory";
+    if (kind !== observation.data.type && !inventoryAsResource) return false;
     if (
       qualifier !== undefined &&
       observation.data.type === "metrics" &&
@@ -359,6 +345,10 @@ function observationMatchesSubject(
       return false;
     }
   }
+  // One rules result holds many rules and none states a resource; the rule's
+  // name is the handle that tells them apart.
+  if (observation.data.type === "alerts" && subject.name !== undefined)
+    return observation.data.rule.name === subject.name;
   const identities = observationIdentities(observation);
   // An observation that states no resource of its own (an agent-run query
   // whose selectors do not name the target exactly, a topology summary) can
@@ -366,7 +356,7 @@ function observationMatchesSubject(
   // the rest.
   if (identities.length === 0) return subject.observation !== undefined;
   return identities.some((identity) =>
-    identityMatchesSubject(identity, observation, subject),
+    identityMatchesSubject(identity, observation, subject, targetPods),
   );
 }
 
@@ -397,17 +387,72 @@ function observationIdentities(
   return identities;
 }
 
+// Pod names are DNS subdomains (letters, digits, hyphens, dots), so a name
+// is a whole word between characters that cannot be part of one; "api"
+// inside "api-other" names another Pod.
+function namesPod(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9.-])${escaped}(?![A-Za-z0-9.-])`).test(text);
+}
+
 function identityMatchesSubject(
   identity: ObservationSubjectIdentity,
   observation: InvestigationEvidenceObservation,
   subject: DiagnosisEvidenceSubject,
+  targetPods: ReadonlySet<string>,
 ): boolean {
-  if (!sameKind(identity.kind, subject.kind) || identity.name !== subject.name)
+  // "The events of namespace X" names a namespace-scoped read whose
+  // observation inherits the resource its call was asked about; the agent
+  // naming the namespace instead is not wrong, so a stated evidence kind plus
+  // a matching namespace is enough for that shape.
+  if (
+    subject.observation !== undefined &&
+    sameKind(subject.kind, "Namespace") &&
+    identity.namespace !== undefined &&
+    identity.namespace === subject.name
+  )
+    return true;
+  // A workload read collects its pods' events, so "the events of Pod X" names
+  // the events observation a diagnose bundle or workload call inherited from
+  // the workload; the ref already fixes the call, uniqueness fixes the card.
+  if (
+    subject.observation !== undefined &&
+    observation.data.type === "events" &&
+    sameKind(subject.kind, "Pod") &&
+    !sameKind(identity.kind, "Pod") &&
+    (identity.namespace === undefined ||
+      subject.namespace === undefined ||
+      identity.namespace === subject.namespace) &&
+    // The Pod has to be the target's own on events the target's read produced,
+    // or named whole by an event: a Pod nothing here establishes is not this card.
+    (subject.name === undefined ||
+      (targetPods.has(subject.name) && observation.relevance !== "broader") ||
+      observation.data.events.some((event) =>
+        namesPod(event.message, subject.name!),
+      ))
+  )
+    return true;
+  if (!sameKind(identity.kind, subject.kind)) return false;
+  // A subject with no name (a listing cited for what it does not contain) is
+  // a wildcard that uniqueness still gates. A listing has no name of its own; the agent naming the entry it means
+  // ("ConfigMap kube-root-ca.crt" in the ConfigMaps of a namespace) still
+  // points at that listing, whether or not the listing holds the entry: an
+  // absent entry is often the point, and the card says which it is.
+  if (
+    !identity.listing &&
+    subject.name !== undefined &&
+    identity.name !== subject.name
+  )
     return false;
+  // A built-in group on a core kind ("apps" on a Pod) is the agent
+  // misremembering the API, not naming a different object: no CRD lives in a
+  // built-in group, so nothing else could be meant. A vendor group on a core
+  // kind (a Knative Service) still names a different object.
   if (
     subject.group !== undefined &&
     identity.group !== undefined &&
-    subject.group.toLowerCase() !== identity.group.toLowerCase()
+    subject.group.toLowerCase() !== identity.group.toLowerCase() &&
+    !(identity.group === "" && isBuiltInGroup(subject.group.toLowerCase()))
   ) {
     return false;
   }

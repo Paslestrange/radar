@@ -24,12 +24,18 @@ import {
   Maximize2,
   HelpCircle,
   FileSearch,
+  Search,
+  ListChecks,
 } from "lucide-react";
 import { stringify as toYaml } from "yaml";
 import { codeToHtml } from "shiki";
 import { DialogPortal } from "@skyhook-io/k8s-ui/components/ui/DialogPortal";
 import { parseContextName } from "../../utils/context-name";
-import { TRANSITION_MENU, overlayExitMs, overlayTransitionStyle } from "../../utils/animation";
+import {
+  TRANSITION_MENU,
+  overlayExitMs,
+  overlayTransitionStyle,
+} from "../../utils/animation";
 import { useAnimatedUnmount } from "../../hooks/useAnimatedUnmount";
 import { useTheme } from "../../context/ThemeContext";
 import { type DiagnoseConsentCopy } from "../../context/DiagnoseCustomization";
@@ -61,6 +67,9 @@ import type {
   InvestigationCaseResolution,
 } from "./investigationCase";
 import { AgentClaimNote } from "./AgentCase";
+import type { InvestigationHealthSignal } from "./investigationState";
+import { Badge } from "@skyhook-io/k8s-ui";
+import { diagnosisHasStoryShape, storyPlainText } from "./investigationStory";
 
 import { useDisclosureReveal } from "./useDisclosureReveal";
 
@@ -196,7 +205,10 @@ function SelectMenu({
   const [open, setOpen] = useState(false);
   // Presence outlives `open` by the menu exit so the list can fade out; the
   // click-away backdrop only exists while logically open.
-  const { shouldRender, isOpen } = useAnimatedUnmount(open, overlayExitMs("menu"));
+  const { shouldRender, isOpen } = useAnimatedUnmount(
+    open,
+    overlayExitMs("menu"),
+  );
   const current = options.find((o) => o.value === value) ?? options[0];
   return (
     <div>
@@ -214,51 +226,50 @@ function SelectMenu({
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary" />
         </button>
         {open && (
-          <div
-            className="fixed inset-0 z-10"
-            onClick={() => setOpen(false)}
-          />
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
         )}
         {shouldRender && (
-            <ul
-              role="listbox"
-              inert={!open || undefined}
-              className={`absolute left-0 right-0 z-20 mt-1 max-h-72 origin-top overflow-y-auto rounded-md border border-theme-border bg-theme-surface py-1 shadow-theme-lg ${TRANSITION_MENU} ${
-                isOpen ? "opacity-100 translate-y-0 scale-100" : "opacity-0 -translate-y-1 scale-[0.97]"
-              } ${open ? "" : "pointer-events-none"}`}
-              style={overlayTransitionStyle(isOpen, "menu")}
-            >
-              {options.map((o) => {
-                const sel = o.value === value;
-                return (
-                  <li key={o.value}>
-                    <button
-                      role="option"
-                      aria-selected={sel}
-                      onClick={() => {
-                        onChange(o.value);
-                        setOpen(false);
-                      }}
-                      className="flex w-full items-start gap-2 px-2.5 py-1.5 text-left hover:bg-theme-hover"
-                    >
-                      <Check
-                        className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${sel ? "text-accent" : "opacity-0"}`}
-                      />
-                      <span className="min-w-0">
-                        <span className="block text-xs font-medium text-theme-text-primary">
-                          {o.label}
-                        </span>
-                        {o.description && (
-                          <span className="block text-[11px] leading-snug text-theme-text-tertiary">
-                            {o.description}
-                          </span>
-                        )}
+          <ul
+            role="listbox"
+            inert={!open || undefined}
+            className={`absolute left-0 right-0 z-20 mt-1 max-h-72 origin-top overflow-y-auto rounded-md border border-theme-border bg-theme-surface py-1 shadow-theme-lg ${TRANSITION_MENU} ${
+              isOpen
+                ? "opacity-100 translate-y-0 scale-100"
+                : "opacity-0 -translate-y-1 scale-[0.97]"
+            } ${open ? "" : "pointer-events-none"}`}
+            style={overlayTransitionStyle(isOpen, "menu")}
+          >
+            {options.map((o) => {
+              const sel = o.value === value;
+              return (
+                <li key={o.value}>
+                  <button
+                    role="option"
+                    aria-selected={sel}
+                    onClick={() => {
+                      onChange(o.value);
+                      setOpen(false);
+                    }}
+                    className="flex w-full items-start gap-2 px-2.5 py-1.5 text-left hover:bg-theme-hover"
+                  >
+                    <Check
+                      className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${sel ? "text-accent" : "opacity-0"}`}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-theme-text-primary">
+                        {o.label}
                       </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                      {o.description && (
+                        <span className="block text-[11px] leading-snug text-theme-text-tertiary">
+                          {o.description}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
       {hint && (
@@ -625,6 +636,8 @@ export function TurnView({
   onCheckStatus,
   onRetryDiagnosis,
   hideConclusion = false,
+  assessment = false,
+  explanation,
   turnIndex,
   evidenceStepIds,
   onViewEvidence,
@@ -639,9 +652,13 @@ export function TurnView({
   onRetryDiagnosis?: () => void;
   /** Sources and agent items an answer turn cited; answers otherwise show none. */
   assessmentSources?: ReactNode;
-  // In the maximized workspace the pinned turn's conclusion renders in the side rail,
-  // so the transcript suppresses its own copy (reasoning + tool calls still show).
+  // The current assessment is Findings; the transcript keeps a pointer to it
+  // rather than a second copy (reasoning + tool calls still show).
   hideConclusion?: boolean;
+  /** This turn is (or was) an assessment: render its full verdict, never as a conversational answer. */
+  assessment?: boolean;
+  /** A saved plain-language explanation of an earlier assessment, shown with it here. */
+  explanation?: AssessmentExplanation;
   turnIndex?: number;
   evidenceStepIds?: ReadonlySet<string>;
   onViewEvidence?: (sourceId: string) => void;
@@ -653,8 +670,9 @@ export function TurnView({
 }) {
   // A follow-up (a turn the user asked a question on) is a conversational reply,
   // not a fresh diagnosis — render it as a plain answer, never the root-cause
-  // anchor or a remediation card.
-  const followup = !!turn.question && !turn.apply && !turn.verify;
+  // anchor or a remediation card — unless its verdict revised the assessment.
+  const followup =
+    !!turn.question && !turn.apply && !turn.verify && !assessment;
   // Whether the done turn has anything for ResultCard to render — mirrors its
   // branch order exactly (apply → followup → structured/healthy), since a followup
   // ONLY ever renders FollowupAnswer (report/rootCause), never the remediation list.
@@ -735,7 +753,17 @@ export function TurnView({
             onCheckStatus={onCheckStatus}
             animate={turn.animateResult !== false}
           />
-        ) : hideConclusion && hasResult ? null : hasResult ? (
+        ) : hideConclusion && hasResult ? (
+          assessment ? (
+            <p
+              data-turn-assessment-pointer
+              className="flex items-center gap-1.5 text-xs text-theme-text-tertiary"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-accent" aria-hidden />
+              Assessment · shown in Findings
+            </p>
+          ) : null
+        ) : hasResult ? (
           <ResultCard
             diagnosis={turn.diagnosis!}
             onApply={onApply}
@@ -743,10 +771,19 @@ export function TurnView({
             onCheckStatus={onCheckStatus}
             animate={turn.animateResult !== false}
             assessmentSources={assessmentSources}
+            explanation={explanation}
+            storyInline={assessment}
+            readOnlyAssessment={assessment}
           />
         ) : (
           <EmptyResult animate={turn.animateResult !== false} />
         ))}
+      {!turn.explainAssessment &&
+      !turn.apply &&
+      turn.status === "done" &&
+      turn.diagnosis?.notes ? (
+        <WorkingNotes notes={turn.diagnosis.notes} />
+      ) : null}
       {turn.explainAssessment ? null : turn.status === "error" && turn.apply ? (
         <ApplyOutcomeCard
           diagnosis={turn.diagnosis}
@@ -1011,6 +1048,8 @@ export function ApplyDialog({
   resourceLabel,
   context,
   fix,
+  reason,
+  precondition,
   managedBy,
   confidence,
 }: {
@@ -1021,6 +1060,10 @@ export function ApplyDialog({
   resourceLabel: string;
   context: string;
   fix?: string;
+  /** The agent's one-clause case for this step, repeated at the decision. */
+  reason?: string;
+  /** The condition the agent attached to this step; shown before the operator confirms. */
+  precondition?: string;
   managedBy?: string; // GitOps/Helm owner of the resource, if any
   confidence?: number;
 }) {
@@ -1082,6 +1125,31 @@ export function ApplyDialog({
             <AIMarkdown className="text-sm text-theme-text-primary [overflow-wrap:anywhere] [&_code]:font-normal [&_p]:my-0 [&_p]:text-theme-text-primary [&_pre]:my-1.5 [&_pre]:whitespace-pre-wrap [&_pre_code]:whitespace-pre-wrap">
               {fixText}
             </AIMarkdown>
+            {reason ? (
+              <p
+                data-apply-reason
+                className="mt-2 text-sm text-theme-text-secondary"
+              >
+                <span className="font-medium text-theme-text-primary">
+                  Why this step:
+                </span>{" "}
+                {reason}
+              </p>
+            ) : null}
+            {precondition ? (
+              <p
+                data-apply-precondition
+                className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-xs text-theme-text-primary"
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <span>
+                  <span className="font-medium">
+                    The agent said this applies only if:
+                  </span>{" "}
+                  {precondition}. Radar has not checked that condition.
+                </span>
+              </p>
+            ) : null}
           </div>
         )}
       </div>
@@ -1507,16 +1575,19 @@ function ToolRow({
         {prettyTool(step.tool)}
       </span>
       {step.summary && !open && (
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-theme-text-tertiary">
+        <span className="min-w-0 flex-1 shrink-[4] truncate font-mono text-[11px] text-theme-text-tertiary">
           {argumentsPreview}
         </span>
       )}
       {errorReason && !open && (
         // The arguments give way first: they are still readable expanded,
-        // while the reason is the one thing this row exists to say.
-        <span className="investigation-tool-reason max-w-full shrink-0 truncate text-[11px] text-semantic-error">
-          {middleTruncate(errorReason)}
-        </span>
+        // while the reason is the one thing this row exists to say. It still
+        // clips at the row's edge; the full text is a hover and a click away.
+        <Tooltip content={errorReason} wrapperClassName="min-w-0 truncate">
+          <span className="investigation-tool-reason block min-w-0 truncate text-[11px] text-semantic-error">
+            {middleTruncate(errorReason)}
+          </span>
+        </Tooltip>
       )}
       {durationLabel && (
         <span className="ml-auto shrink-0 text-[11px] text-theme-text-tertiary">
@@ -1936,6 +2007,13 @@ export function ResultCard({
   assessmentAction,
   assessmentSources,
   actionNotice,
+  storyInline = false,
+  readOnlyAssessment = false,
+  revisedAfter,
+  assessmentLimits,
+  assessmentCopy,
+  healthSignals,
+  onRevealSource,
 }: {
   diagnosis: Diagnosis;
   onApply?: (fix: string) => void;
@@ -1944,6 +2022,21 @@ export function ResultCard({
   applyOutcome?: ApplyMutationOutcome;
   followup?: boolean;
   section?: "full" | "conclusion" | "actions";
+  /**
+   * Render the story as plain prose inside this card. Findings renders the
+   * story itself, with placed cards, so it leaves this off; Activity's
+   * read-only copies of earlier assessments turn it on.
+   */
+  storyInline?: boolean;
+  /** An earlier assessment shown for the record: no Apply, labelled as such. */
+  readOnlyAssessment?: boolean;
+  /** The question that produced this revised assessment, when it replaced an earlier one. */
+  revisedAfter?: string;
+  /** Reads Radar could not complete for this assessment; listed under Still open. */
+  assessmentLimits?: string[];
+  assessmentCopy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
+  healthSignals?: InvestigationHealthSignal[];
+  onRevealSource?: (sourceId: string) => void;
   onCheckStatus?: () => void;
   animate?: boolean;
   /** Additional navigation placed in the assessment action row. */
@@ -1999,14 +2092,53 @@ export function ResultCard({
         evidenceConflictExplainedBy={evidenceConflictExplainedBy}
         assessmentAction={assessmentAction}
         assessmentSources={assessmentSources}
+        storyInline={storyInline}
+        revisedAfter={revisedAfter}
+        assessmentLimits={assessmentLimits}
+        assessmentCopy={assessmentCopy}
+        healthSignals={healthSignals}
+        onRevealSource={onRevealSource}
       />
     );
   // Couldn't-determine is its own honest state — never a confident all-clear, never
-  // the alarming root-cause anchor.
-  if (diagnosis.inconclusive && !diagnosis.rootCause)
-    return section === "actions" ? null : (
+  // the alarming root-cause anchor. With typed steps it can still carry the
+  // next check, which the actions section renders like any other step.
+  if (diagnosis.inconclusive && !diagnosis.rootCause) {
+    if (section === "actions")
+      return (diagnosis.steps?.length ?? 0) > 0 ? (
+        <DiagnosisResult
+          diagnosis={diagnosis}
+          onApply={readOnlyAssessment ? undefined : onApply}
+          section="actions"
+          animate={animate}
+          showDisclaimer={false}
+          compactActions={compactActions}
+          actionNotice={actionNotice}
+          readOnlyAssessment={readOnlyAssessment}
+        />
+      ) : null;
+    return (
       <>
-        <InconclusiveCard diagnosis={diagnosis} animate={animate} />
+        <InconclusiveCard
+          diagnosis={diagnosis}
+          animate={animate}
+          storyInline={storyInline}
+          revisedAfter={revisedAfter}
+          assessmentLimits={assessmentLimits}
+          assessmentCopy={assessmentCopy}
+        />
+        {section === "full" && (diagnosis.steps?.length ?? 0) > 0 ? (
+          <DiagnosisResult
+            diagnosis={diagnosis}
+            onApply={readOnlyAssessment ? undefined : onApply}
+            section="actions"
+            animate={false}
+            showDisclaimer={false}
+            compactActions={compactActions}
+            actionNotice={actionNotice}
+            readOnlyAssessment={readOnlyAssessment}
+          />
+        ) : null}
         {assessmentSources ? (
           <AssessmentSourceDetails>{assessmentSources}</AssessmentSourceDetails>
         ) : null}
@@ -2015,6 +2147,7 @@ export function ResultCard({
         )}
       </>
     );
+  }
   // A turn with no structured root cause and no remediation (e.g. "looks healthy",
   // or a clarifying question) is not a diagnosis — render it neutrally rather than
   // forcing the alarming root-cause anchor onto a non-problem.
@@ -2036,7 +2169,7 @@ export function ResultCard({
   return (
     <DiagnosisResult
       diagnosis={diagnosis}
-      onApply={onApply}
+      onApply={readOnlyAssessment ? undefined : onApply}
       explanation={explanation}
       section={section}
       animate={animate}
@@ -2045,7 +2178,338 @@ export function ResultCard({
       assessmentAction={assessmentAction}
       assessmentSources={assessmentSources}
       actionNotice={actionNotice}
+      storyInline={storyInline}
+      readOnlyAssessment={readOnlyAssessment}
+      revisedAfter={revisedAfter}
+      assessmentLimits={assessmentLimits}
+      assessmentCopy={assessmentCopy}
     />
+  );
+}
+
+/**
+ * The whole assessment as text: headline, certainty, what is unresolved, the
+ * technical cause, the story without its markers, and the steps. Copying only
+ * the headline would ship the persuasive half without its caveats.
+ */
+/** What Radar adds to the agent's verdict when the assessment is copied for a channel. */
+interface AssessmentCopyRadar {
+  /** Reads Radar could not complete, as shown in Still open. */
+  limits?: readonly string[];
+  /** Adverse Radar cards the agent explained, as shown in Still open. */
+  signals?: readonly string[];
+  /** Adverse Radar cards nothing explains, as shown above a healthy verdict. */
+  flags?: readonly string[];
+  /** Where and when: the header line a reader in a channel needs first. */
+  context?: {
+    target: string;
+    cluster?: string;
+    startedAt?: string;
+    agent?: string;
+  };
+  /** The placed cards, as short excerpts: the receipts behind the headline. */
+  receipts?: readonly {
+    title: string;
+    role?: string;
+    lines: readonly string[];
+    /** The agent's statement of what this result does not cover. */
+    gap?: string;
+  }[];
+}
+
+/**
+ * The assessment as Markdown for a channel or a ticket: context, headline,
+ * cause, the receipts, what is still open, the next step. The full story and
+ * every captured result stay in Radar; the text says so.
+ */
+export function assessmentCopyText(
+  diagnosis: Diagnosis,
+  radar: AssessmentCopyRadar = {},
+): string {
+  const parts: string[] = [];
+  if (radar.context) {
+    const when = radar.context.startedAt
+      ? new Date(radar.context.startedAt).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        })
+      : undefined;
+    parts.push(
+      [
+        `**${radar.context.target}**`,
+        radar.context.cluster,
+        when,
+        radar.context.agent ? `via ${radar.context.agent}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    );
+  }
+  if (diagnosis.summary) {
+    const certainty = diagnosis.healthy
+      ? "Healthy"
+      : diagnosis.certainty
+        ? CERTAINTY_LABEL[diagnosis.certainty]
+        : undefined;
+    parts.push(
+      `**${diagnosis.summary.trim()}**${certainty ? ` — ${certainty} (agent's word)` : ""}`,
+    );
+  } else if (diagnosis.certainty) {
+    parts.push(`Certainty (agent): ${CERTAINTY_LABEL[diagnosis.certainty]}`);
+  }
+  // The pasted text must not read more confident than the screen: Radar's
+  // own qualifications travel with the agent's.
+  const flags = (radar.flags ?? []).filter((item) => item.trim());
+  if (flags.length > 0)
+    parts.push(
+      [
+        "Radar flagged:",
+        ...flags.map((item) => `- ${item}`),
+        "Read those cards before treating this as an all-clear.",
+      ].join("\n"),
+    );
+  const unresolved = [
+    ...(diagnosis.unresolved ?? []),
+    ...(radar.limits ?? []),
+    ...(radar.signals ?? []),
+  ].filter((item) => item.trim());
+  if (unresolved.length > 0)
+    parts.push(
+      ["Still open:", ...unresolved.map((item) => `- ${item}`)].join("\n"),
+    );
+  if (diagnosis.rootCause) parts.push(storyPlainText(diagnosis.rootCause));
+  const receipts = (radar.receipts ?? []).filter((receipt) => receipt.title);
+  if (receipts.length > 0) {
+    parts.push(
+      [
+        "Evidence (Radar):",
+        ...receipts.map((receipt) =>
+          [
+            `- **${receipt.title}**${receipt.role ? ` · ${receipt.role}` : ""}`,
+            ...receipt.lines
+              .filter((line) => line.trim())
+              .map((line) => `  > ${line.trim()}`),
+            ...(receipt.gap ? [`  Not shown: ${receipt.gap}`] : []),
+          ].join("\n"),
+        ),
+      ].join("\n"),
+    );
+  } else if (!radar.context) {
+    const story = storyPlainText(diagnosis.report ?? "");
+    if (story) parts.push(story);
+  }
+  const steps = diagnosis.steps?.length
+    ? diagnosis.steps.map(
+        (step, index) =>
+          `${index + 1}. [${STEP_KIND_LABEL[step.kind]}] ${step.text}${step.precondition ? ` (only if ${step.precondition})` : ""}`,
+      )
+    : (diagnosis.remediation ?? []).map(
+        (text, index) => `${index + 1}. ${text}`,
+      );
+  if (steps.length > 0) {
+    if (radar.context) {
+      // A channel gets the recommended step; the rest wait in Radar.
+      const lead = diagnosis.recommendedIndex
+        ? diagnosis.recommendedIndex - 1
+        : 0;
+      const first = steps[lead] ?? steps[0];
+      const rest = steps.length - 1;
+      parts.push(
+        [
+          `Next step: ${first.replace(/^\d+\. /, "")}`,
+          diagnosis.recommendedReason
+            ? `Why: ${diagnosis.recommendedReason}`
+            : undefined,
+          rest > 0
+            ? `${rest} more ${rest === 1 ? "step" : "steps"} in Radar.`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+    } else parts.push(["Next steps:", ...steps].join("\n"));
+  }
+  if (radar.context)
+    parts.push(
+      "Full analysis and every captured result: open the investigation in Radar.",
+    );
+  return parts.join("\n\n");
+}
+
+const CERTAINTY_LABEL: Record<NonNullable<Diagnosis["certainty"]>, string> = {
+  established: "Established",
+  likely: "Likely",
+  suspected: "Suspected",
+};
+
+// The word is the agent's; the clause says what kind of Radar evidence sits
+// behind it, so a reader knows what the word licenses them to do.
+const CERTAINTY_DEFINITION: Record<
+  NonNullable<Diagnosis["certainty"]>,
+  string
+> = {
+  established:
+    "The agent's word. It found the cause stated outright in Radar's results — a log line, an event, a condition — not just consistent with them.",
+  likely:
+    "The agent's word. Radar's results fit this explanation, but none of them states the cause outright.",
+  suspected:
+    "The agent's word. A plausible reading on thin or indirect evidence; treat it as a lead, not a finding.",
+};
+const HEALTHY_DEFINITION: Record<
+  NonNullable<Diagnosis["certainty"]>,
+  string
+> = {
+  established:
+    "The agent found no live problem, and Radar's results show that directly — the pod state, logs and events it read.",
+  likely:
+    "The agent found no live problem; Radar's results fit that reading but do not show it outright.",
+  suspected:
+    "The agent leans healthy on thin or indirect evidence; treat it as a lead, not a finding.",
+};
+
+const STEP_KIND_LABEL: Record<
+  NonNullable<Diagnosis["steps"]>[number]["kind"],
+  string
+> = {
+  mitigate: "Mitigate",
+  verify: "Verify",
+  investigate: "Investigate",
+};
+
+/**
+ * The headline of an assessment that carries the story contract: the
+ * agent's plain-language summary with its own word for how sure it is, the
+ * technical cause beneath it, and what is still unresolved — which renders
+ * whenever the agent listed anything, and says so when it listed nothing,
+ * because a persuasive story needs its caveats above the fold, not inside it.
+ */
+function AssessmentHeadline({
+  diagnosis,
+  tone,
+  revisedAfter,
+  limits = [],
+  signals,
+  flags,
+  copy,
+}: {
+  diagnosis: Diagnosis;
+  tone: "cause" | "healthy" | "inconclusive";
+  revisedAfter?: string;
+  /** Reads Radar could not complete for this assessment, one line each. */
+  limits?: string[];
+  /** Adverse Radar cards the agent explained, with its position; first in Still open. */
+  signals?: { text: string; onReveal?: () => void }[];
+  /** Adverse Radar cards nothing explains; shown above a healthy verdict, copied with it. */
+  flags?: string[];
+  /** Context and receipts for the channel copy. */
+  copy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
+}) {
+  const summary = diagnosis.summary?.trim();
+  if (!summary) return null;
+  // One block for everything that qualifies the answer: what the agent left
+  // open and what Radar could not read. The rest of the page states the
+  // answer; this is the only place it argues with itself.
+  const unresolved = [
+    ...(diagnosis.unresolved ?? []).filter((item) => item.trim()),
+    ...limits,
+  ];
+  const stillOpen = (signals ?? []).length > 0 || unresolved.length > 0;
+  return (
+    <div data-assessment-headline className="space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[15px] font-semibold leading-snug text-theme-text-primary [overflow-wrap:anywhere] [text-wrap:balance]">
+          {summary}
+        </p>
+        <CopyButton
+          text={assessmentCopyText(diagnosis, {
+            limits,
+            signals: (signals ?? []).map((signal) => signal.text),
+            flags,
+            ...copy,
+          })}
+          label="Copy for a channel"
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-theme-text-secondary">
+        {diagnosis.certainty ? (
+          <Tooltip
+            content={
+              tone === "healthy"
+                ? HEALTHY_DEFINITION[diagnosis.certainty]
+                : CERTAINTY_DEFINITION[diagnosis.certainty]
+            }
+          >
+            <Badge tone="agent" size="sm">
+              <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden />
+              {tone === "healthy"
+                ? "Healthy"
+                : CERTAINTY_LABEL[diagnosis.certainty]}
+            </Badge>
+          </Tooltip>
+        ) : null}
+        {revisedAfter ? (
+          <span className="min-w-0 text-theme-text-tertiary">
+            Revised after: &ldquo;
+            {revisedAfter.length > 110
+              ? `${revisedAfter.slice(0, 110).trimEnd()}…`
+              : revisedAfter}
+            &rdquo;
+          </span>
+        ) : null}
+      </div>
+      {tone === "cause" && diagnosis.rootCause ? (
+        <AIMarkdown className="text-[13px] leading-relaxed text-theme-text-secondary [overflow-wrap:anywhere] [&_code]:font-normal [&_p]:my-0 [&_p]:text-theme-text-secondary">
+          {diagnosis.rootCause}
+        </AIMarkdown>
+      ) : null}
+      {stillOpen ? (
+        <div
+          data-assessment-unresolved
+          className="rounded-md border border-theme-border bg-theme-base/40 px-2.5 py-2"
+        >
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-theme-text-secondary">
+            <HelpCircle className="h-3 w-3" aria-hidden />
+            {tone === "inconclusive"
+              ? "What blocked a conclusion"
+              : "Still open"}
+          </div>
+          <ul className="space-y-0.5 text-xs text-theme-text-primary">
+            {unresolved.map((item, index) => (
+              <li key={`open-${index}`} className="flex gap-1.5">
+                <span aria-hidden className="text-theme-text-tertiary">
+                  –
+                </span>
+                <span className="[overflow-wrap:anywhere]">{item}</span>
+              </li>
+            ))}
+            {(signals ?? []).map((signal, index) => (
+              <li
+                key={`signal-${index}`}
+                className="flex gap-1.5"
+                data-health-signal
+              >
+                <span aria-hidden className="text-theme-text-tertiary">
+                  –
+                </span>
+                {signal.onReveal ? (
+                  <button
+                    type="button"
+                    onClick={signal.onReveal}
+                    className="text-left [overflow-wrap:anywhere] hover:text-accent-text"
+                  >
+                    {signal.text}
+                  </button>
+                ) : (
+                  <span className="[overflow-wrap:anywhere]">
+                    {signal.text}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -2168,11 +2632,11 @@ export function AssessmentSources({
                 </div>
                 <button
                   type="button"
-                  aria-label={`View ${prettyTool(source.tool)} source used for this assessment`}
+                  aria-label={`View ${prettyTool(source.tool)} result used for this assessment`}
                   onClick={() => onViewSource(source.id)}
                   className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-accent-text hover:bg-theme-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                 >
-                  View source
+                  View result
                 </button>
               </div>
               {notes.length > 0 ? (
@@ -2216,6 +2680,36 @@ export function AssessmentSources({
             : `${unlinkedEvidence} agent notes could not be linked to Radar results and are not shown.`}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+function WorkingNotes({ notes }: { notes: string }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const reveal = useDisclosureReveal<HTMLDivElement>();
+  return (
+    <div ref={reveal.elementRef} data-turn-working-notes>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => {
+          setOpen(!open);
+          reveal.revealAfterToggle(!open);
+        }}
+        className="flex items-center gap-1.5 rounded-md py-1 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
+      >
+        <CollapseChevron open={open} className="h-3.5 w-3.5" />
+        Evidence considered
+      </button>
+      <div id={id}>
+        <Collapse open={open}>
+          <AIMarkdown className="py-0.5 text-xs leading-relaxed text-theme-text-tertiary [overflow-wrap:anywhere] [&_li]:text-theme-text-tertiary [&_p]:my-0.5 [&_strong]:font-medium [&_strong]:text-theme-text-secondary">
+            {notes}
+          </AIMarkdown>
+        </Collapse>
+      </div>
     </div>
   );
 }
@@ -2289,6 +2783,11 @@ function DiagnosisResult({
   assessmentAction,
   assessmentSources,
   actionNotice,
+  storyInline = false,
+  readOnlyAssessment = false,
+  revisedAfter,
+  assessmentLimits,
+  assessmentCopy,
 }: {
   diagnosis: Diagnosis;
   onApply?: (fix: string) => void;
@@ -2300,7 +2799,21 @@ function DiagnosisResult({
   assessmentAction?: ReactNode;
   assessmentSources?: ReactNode;
   actionNotice?: string;
+  storyInline?: boolean;
+  readOnlyAssessment?: boolean;
+  revisedAfter?: string;
+  /** Reads Radar could not complete for this assessment; listed under Still open. */
+  assessmentLimits?: string[];
+  assessmentCopy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
 }) {
+  // The story contract: a summary headline above, the story rendered by the
+  // host (or inline as plain prose), typed steps below.
+  const storyShape = diagnosisHasStoryShape(diagnosis);
+  const analysisText =
+    storyShape && storyInline
+      ? storyPlainText(diagnosis.report)
+      : diagnosis.report;
+  const showAnalysisDisclosure = !storyShape || storyInline;
   const [detail, setDetail] = useState<"analysis" | "explanation" | null>(
     explanation?.status === "running" ? "explanation" : null,
   );
@@ -2336,10 +2849,15 @@ function DiagnosisResult({
   // "Full analysis" (never relabel the report as a causal assessment).
   const rootCause = diagnosis.rootCause;
   const remediation = diagnosis.remediation || [];
+  const steps = diagnosis.steps ?? [];
+  const typedSteps = steps.length === remediation.length && steps.length > 0;
   const hasRemediation = remediation.length > 0;
   const recIdx = diagnosis.recommendedIndex;
   const recValid =
-    recIdx != null && recIdx >= 1 && recIdx <= remediation.length;
+    recIdx != null &&
+    recIdx >= 1 &&
+    recIdx <= remediation.length &&
+    (!typedSteps || steps[recIdx - 1].kind === "mitigate");
   // Apply is offered ONLY when the agent pointed at a safe step (recommended_index).
   // When it returns 0 / none ("needs human judgement"), we honor that and don't
   // offer one-click apply — the steps stay copy-only with a note.
@@ -2360,9 +2878,11 @@ function DiagnosisResult({
     index: number;
   }) => {
     const isRec = recValid && i === recIdx! - 1;
+    const step = typedSteps ? steps[i] : undefined;
     return (
       <div
         key={i}
+        data-step-kind={step?.kind}
         className={
           isRec ? "rounded-lg border border-accent/40 bg-accent/5 p-2.5" : ""
         }
@@ -2375,55 +2895,82 @@ function DiagnosisResult({
                 : "bg-theme-base text-theme-text-tertiary"
             }`}
           >
-            {i + 1}
+            {step ? (
+              step.kind === "mitigate" ? (
+                <Wrench className="h-2.5 w-2.5" aria-hidden />
+              ) : step.kind === "verify" ? (
+                <ListChecks className="h-2.5 w-2.5" aria-hidden />
+              ) : (
+                <Search className="h-2.5 w-2.5" aria-hidden />
+              )
+            ) : (
+              i + 1
+            )}
           </span>
           <div className="min-w-0 flex-1">
-            {isRec && (
-              <div className="mb-1">
-                <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-accent">
-                  <Sparkles className="h-3 w-3" />
-                  Recommended
-                </div>
-                {diagnosis.recommendedReason && (
-                  <div className="mt-0.5 max-w-[100ch] text-[11px] leading-snug text-theme-text-tertiary">
-                    {diagnosis.recommendedReason}
-                  </div>
+            {/* Labels, then the action cluster pushed to the row's end, then
+                the reason on its own line — so the step text below spans the
+                card instead of wrapping beside the buttons. */}
+            <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              {(isRec || step) && (
+                <>
+                  {step ? (
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">
+                      {STEP_KIND_LABEL[step.kind]}
+                    </span>
+                  ) : null}
+                  {isRec && (
+                    <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-accent">
+                      <Sparkles className="h-3 w-3" />
+                      Recommended
+                    </span>
+                  )}
+                </>
+              )}
+              <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                {canApply && isRec && (
+                  <button
+                    onClick={() => onApply!(r)}
+                    className="inline-flex items-center gap-1 rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent/20"
+                  >
+                    <Wrench className="h-3 w-3" />
+                    Apply…
+                  </button>
                 )}
+                {remediationCommands(r).map((command, c, all) => (
+                  <CopyButton
+                    key={c}
+                    text={command}
+                    label={
+                      all.length > 1
+                        ? `Copy command ${c + 1} of step ${i + 1}`
+                        : `Copy command from step ${i + 1}`
+                    }
+                  />
+                ))}
               </div>
+            </div>
+            {/* The condition and the reason are read before the command is
+                copied, so they precede it at a size that is meant to be read. */}
+            {step?.precondition ? (
+              <p
+                data-step-precondition
+                className="mb-1.5 text-[13px] leading-snug text-warning-text"
+              >
+                Only if {step.precondition.replace(/^(if|when|once)\s+/i, "")}
+              </p>
+            ) : null}
+            {isRec && diagnosis.recommendedReason && (
+              <p
+                data-recommended-reason
+                className="mb-1.5 text-[13px] leading-snug text-theme-text-secondary"
+              >
+                {diagnosis.recommendedReason}
+              </p>
             )}
             <AIMarkdown className="max-w-[100ch] text-sm [overflow-wrap:anywhere] [&_p]:my-0 [&_pre]:my-1.5">
               {r}
             </AIMarkdown>
-          </div>
-          {/* Action cluster: compact Apply (recommended = subtly
-                        filled, others = ghost) sits next to Copy so each row's
-                        actions stay together. The ellipsis signals a confirm
-                        dialog follows — it doesn't apply immediately. */}
-          <div className="flex shrink-0 items-center gap-0.5">
-            {canApply && isRec && (
-              <button
-                onClick={() => onApply!(r)}
-                className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-accent transition-colors ${
-                  isRec
-                    ? "border border-accent/40 bg-accent/10 hover:bg-accent/20"
-                    : "hover:bg-accent/10"
-                }`}
-              >
-                <Wrench className="h-3 w-3" />
-                Apply…
-              </button>
-            )}
-            {remediationCommands(r).map((command, c, all) => (
-              <CopyButton
-                key={c}
-                text={command}
-                label={
-                  all.length > 1
-                    ? `Copy command ${c + 1} of step ${i + 1}`
-                    : `Copy command from step ${i + 1}`
-                }
-              />
-            ))}
           </div>
         </div>
       </div>
@@ -2431,8 +2978,30 @@ function DiagnosisResult({
   };
   return (
     <div className={`mt-3 space-y-2 ${animate ? "animate-result-in" : ""}`}>
+      {showConclusion && storyShape && (
+        <div
+          className={
+            section === "conclusion"
+              ? ""
+              : "rounded-lg border border-theme-border bg-theme-surface p-3"
+          }
+        >
+          {readOnlyAssessment ? (
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">
+              Earlier assessment
+            </div>
+          ) : null}
+          <AssessmentHeadline
+            diagnosis={diagnosis}
+            tone="cause"
+            revisedAfter={revisedAfter}
+            limits={assessmentLimits}
+            copy={assessmentCopy}
+          />
+        </div>
+      )}
       {/* Likely cause — agent-authored, visually prominent without claiming proof. */}
-      {showConclusion && rootCause && (
+      {showConclusion && !storyShape && rootCause && (
         <div
           className={
             section === "conclusion"
@@ -2478,7 +3047,7 @@ function DiagnosisResult({
           {section !== "actions" && (
             <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-theme-text-secondary">
               <Wrench className="h-3.5 w-3.5 text-accent" />
-              Remediation
+              {typedSteps ? "Next steps" : "Remediation"}
             </div>
           )}
           {actionNotice && (
@@ -2486,20 +3055,47 @@ function DiagnosisResult({
           )}
           <div id={stepsId}>
             <ol>
-              {remediationEntries.map((entry) => (
-                <li key={entry.index} value={entry.index + 1}>
-                  <Collapse
-                    open={
-                      !compactActions ||
-                      showAllSteps ||
-                      entry.index === primaryActionIndex
-                    }
-                    mountLazily
-                  >
-                    <div className="pt-2">{renderRemediationStep(entry)}</div>
-                  </Collapse>
-                </li>
-              ))}
+              {remediationEntries.map((entry) => {
+                const expanded =
+                  !compactActions ||
+                  showAllSteps ||
+                  entry.index === primaryActionIndex;
+                const step = typedSteps ? steps[entry.index] : undefined;
+                return (
+                  <li key={entry.index} value={entry.index + 1}>
+                    <Collapse open={expanded} mountLazily>
+                      <div className="pt-2">{renderRemediationStep(entry)}</div>
+                    </Collapse>
+                    {/* A folded step still shows what it is: its kind and
+                        first line, one row each, so the alternatives are
+                        readable before anyone opens them. */}
+                    {!expanded ? (
+                      <button
+                        type="button"
+                        data-step-folded={step?.kind ?? "step"}
+                        onClick={() => {
+                          setShowAllSteps(true);
+                          stepsReveal.revealAfterToggle(true);
+                        }}
+                        className="mt-1.5 flex w-full min-w-0 items-baseline gap-2 rounded-md px-2 py-1 text-left text-xs text-theme-text-secondary hover:bg-theme-hover"
+                      >
+                        {step ? (
+                          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">
+                            {STEP_KIND_LABEL[step.kind]}
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-[10px] font-semibold text-theme-text-tertiary">
+                            {entry.index + 1}
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1 truncate">
+                          {remediationHeadline(entry.text)}
+                        </span>
+                      </button>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ol>
           </div>
           {compactActions && remediation.length > 1 ? (
@@ -2518,7 +3114,9 @@ function DiagnosisResult({
                 ? recValid
                   ? "Show only recommended step"
                   : "Show only first step"
-                : `Show ${hiddenStepCount} more ${hiddenStepCount === 1 ? "step" : "steps"}`}
+                : hiddenStepCount === 1
+                  ? "Expand the other step"
+                  : "Expand all steps"}
             </button>
           ) : null}
           {!actionNotice && !recValid && (
@@ -2531,10 +3129,12 @@ function DiagnosisResult({
         </div>
       )}
 
-      {/* Full analysis — the agent's detailed evidence, on demand. */}
+      {/* Full analysis — the agent's detailed evidence, on demand. Under the
+          story contract Findings renders the story itself, so only the
+          explanation and sources remain here. */}
       {showConclusion &&
-        (diagnosis.report ||
-          diagnosis.confidence != null ||
+        ((showAnalysisDisclosure && diagnosis.report) ||
+          (showAnalysisDisclosure && diagnosis.confidence != null) ||
           explanation ||
           assessmentAction ||
           assessmentSources) && (
@@ -2543,8 +3143,8 @@ function DiagnosisResult({
               className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2"
               data-assessment-actions
             >
-              {(diagnosis.report ||
-                diagnosis.confidence != null ||
+              {((showAnalysisDisclosure && diagnosis.report) ||
+                (showAnalysisDisclosure && diagnosis.confidence != null) ||
                 assessmentSources) && (
                 <button
                   type="button"
@@ -2560,7 +3160,9 @@ function DiagnosisResult({
                     open={showAnalysis}
                     className="h-3.5 w-3.5"
                   />
-                  {diagnosis.report ? "Full analysis" : "Assessment details"}
+                  {showAnalysisDisclosure && diagnosis.report
+                    ? "Full analysis"
+                    : "Assessment details"}
                 </button>
               )}
               {explanation && (
@@ -2606,16 +3208,22 @@ function DiagnosisResult({
               <div id={`${analysisId}-analysis`}>
                 <Collapse open={detail === "analysis"} mountLazily>
                   <div className="border-t border-theme-border/60 px-3 py-2">
-                    <p className="mb-2 text-xs text-theme-text-tertiary">
-                      Agent confidence:{" "}
-                      {diagnosis.confidence != null
-                        ? confidenceLabel(diagnosis.confidence)
-                        : "not stated"}
-                      {diagnosis.confidence != null ? " · self-reported" : ""}
-                    </p>
-                    <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_h2:first-child]:mt-0 [&_h2]:mb-1.5 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:uppercase [&_h2]:tracking-wide [&_h2]:text-theme-text-tertiary [&_h3]:text-sm [&_li]:text-theme-text-secondary [&_p]:my-1.5 [&_p]:text-theme-text-secondary">
-                      {diagnosis.report}
-                    </AIMarkdown>
+                    {showAnalysisDisclosure ? (
+                      <>
+                        <p className="mb-2 text-xs text-theme-text-tertiary">
+                          Agent confidence:{" "}
+                          {diagnosis.confidence != null
+                            ? confidenceLabel(diagnosis.confidence)
+                            : "not stated"}
+                          {diagnosis.confidence != null
+                            ? " · self-reported"
+                            : ""}
+                        </p>
+                        <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_h2:first-child]:mt-0 [&_h2]:mb-1.5 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:uppercase [&_h2]:tracking-wide [&_h2]:text-theme-text-tertiary [&_h3]:text-sm [&_li]:text-theme-text-secondary [&_p]:my-1.5 [&_p]:text-theme-text-secondary">
+                          {analysisText}
+                        </AIMarkdown>
+                      </>
+                    ) : null}
                     {assessmentSources}
                   </div>
                 </Collapse>
@@ -2678,6 +3286,17 @@ function DiagnosisResult({
   );
 }
 
+/** The banner line and the clipboard line for one adverse Radar card must be the same words. */
+function healthFlagSentence(flag: {
+  status: string;
+  title: string;
+  role?: string;
+}): string {
+  return flag.status === "contradiction"
+    ? `The agent calls ${flag.title} a ${flag.role} and still reports healthy`
+    : `Radar flagged ${flag.title} · no explanation is linked to it`;
+}
+
 function AllClearCard({
   diagnosis,
   animate,
@@ -2687,6 +3306,12 @@ function AllClearCard({
   evidenceConflictExplainedBy,
   assessmentAction,
   assessmentSources,
+  storyInline = false,
+  revisedAfter,
+  assessmentLimits,
+  assessmentCopy,
+  healthSignals,
+  onRevealSource,
 }: {
   diagnosis: Diagnosis;
   animate: boolean;
@@ -2696,22 +3321,153 @@ function AllClearCard({
   evidenceConflictExplainedBy?: string[];
   assessmentAction?: ReactNode;
   assessmentSources?: ReactNode;
+  storyInline?: boolean;
+  revisedAfter?: string;
+  /** Reads Radar could not complete for this assessment; listed under Still open. */
+  assessmentLimits?: string[];
+  assessmentCopy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
+  /** Adverse Radar cards with the agent's position on each (story shape). */
+  healthSignals?: InvestigationHealthSignal[];
+  onRevealSource?: (sourceId: string) => void;
 }) {
+  const storyShape = diagnosisHasStoryShape(diagnosis);
   const [showAnalysis, setShowAnalysis] = useState(false);
   const analysisReveal = useDisclosureReveal<HTMLDivElement>();
   const analysisId = useId();
   const report =
-    diagnosis.report ||
-    "The agent did not identify a problem in the evidence it checked.";
+    (storyShape && !storyInline ? "" : storyPlainText(diagnosis.report)) ||
+    (storyShape
+      ? ""
+      : "The agent did not identify a problem in the evidence it checked.");
   const detailed = report.length > 320 || report.split("\n").length > 2;
-  const summary = detailed
-    ? "The agent found no active problem in the evidence it reviewed."
-    : report;
+  const summary = storyShape
+    ? ""
+    : detailed
+      ? "The agent found no active problem in the evidence it reviewed."
+      : report;
   const explained =
     evidenceConflict &&
     !!evidenceConflictExplainedBy &&
     evidenceConflictExplainedBy.length > 0;
   const unexplainedConflict = evidenceConflict && !explained;
+  // Story shape: the summary and the certainty word are the verdict; adverse
+  // Radar cards the agent explained become lines in Still open, and only a
+  // card the agent's verdict never addressed (or contradicts) keeps a header
+  // that names it — so the reader knows exactly how it relates to the answer.
+  const signals = healthSignals ?? [];
+  const flagged = signals.filter(
+    (signal) =>
+      signal.status === "unaddressed" || signal.status === "contradiction",
+  );
+  const stillOpenSignals = signals
+    .filter(
+      (signal) => signal.status === "explained" || signal.status === "related",
+    )
+    .map((signal) => ({
+      text:
+        signal.status === "explained"
+          ? `Radar flagged ${signal.title} · the agent looked at it and reads it as not a live problem: ${signal.claim}`
+          : `Radar flagged ${signal.title} · the agent reads it as related, but not what matters here: ${signal.claim}`,
+      onReveal:
+        signal.sourceId && onRevealSource
+          ? () => onRevealSource(signal.sourceId!)
+          : undefined,
+    }));
+  // The analysis disclosure (Activity's read-only copy of an earlier healthy
+  // assessment carries its story inline as plain prose), the action slot and
+  // the disclaimer are the same in both shapes.
+  const trailing = (
+    <>
+      {detailed || assessmentAction || assessmentSources ? (
+        <div>
+          <div
+            className="flex flex-wrap items-center gap-3 pt-2"
+            data-assessment-actions
+          >
+            {(detailed || assessmentSources) && (
+              <button
+                type="button"
+                aria-expanded={showAnalysis}
+                aria-controls={analysisId}
+                onClick={() => {
+                  setShowAnalysis(!showAnalysis);
+                  analysisReveal.revealAfterToggle(!showAnalysis);
+                }}
+                className="flex items-center gap-1.5 rounded-md py-2 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
+              >
+                <CollapseChevron open={showAnalysis} className="h-3.5 w-3.5" />
+                {detailed ? "Full analysis" : "Assessment details"}
+              </button>
+            )}
+            {assessmentAction && (
+              <div className="ml-auto">{assessmentAction}</div>
+            )}
+          </div>
+          <div id={analysisId} ref={analysisReveal.elementRef}>
+            <Collapse open={showAnalysis}>
+              <div className="border-t border-theme-border/60 px-3 py-2">
+                <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_p]:my-1.5 [&_p]:text-theme-text-secondary [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
+                  {detailed ? report : ""}
+                </AIMarkdown>
+                {assessmentSources}
+              </div>
+            </Collapse>
+          </div>
+        </div>
+      ) : null}
+      {showDisclaimer ? (
+        <div className="flex items-start gap-1 px-0.5 text-[11px] text-theme-text-tertiary">
+          <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>AI-generated — verify if symptoms persist</span>
+        </div>
+      ) : null}
+    </>
+  );
+  if (storyShape) {
+    return (
+      <div className={`mt-3 space-y-2 ${animate ? "animate-result-in" : ""}`}>
+        {flagged.map((flag) => (
+          <div
+            key={`${flag.groupId ?? flag.title}-${flag.status}`}
+            data-health-flag={flag.status}
+            className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2 text-xs text-theme-text-primary"
+          >
+            <div className="flex items-center gap-1.5 font-semibold text-amber-500">
+              <AlertTriangle className="h-3.5 w-3.5" aria-hidden />
+              {healthFlagSentence(flag)}
+            </div>
+            <p className="mt-1 text-theme-text-secondary">
+              {flag.status === "contradiction"
+                ? "Read the card before treating this as an all-clear."
+                : "It may be unrelated to what you asked, or missed. Open it before treating this as an all-clear."}
+              {flag.sourceId && onRevealSource ? (
+                <>
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => onRevealSource(flag.sourceId!)}
+                    className="font-medium text-accent-text hover:underline"
+                  >
+                    View the card
+                  </button>
+                </>
+              ) : null}
+            </p>
+          </div>
+        ))}
+        <AssessmentHeadline
+          diagnosis={diagnosis}
+          tone="healthy"
+          revisedAfter={revisedAfter}
+          flags={flagged.map(healthFlagSentence)}
+          limits={assessmentLimits}
+          copy={assessmentCopy}
+          signals={stillOpenSignals}
+        />
+        {trailing}
+      </div>
+    );
+  }
   return (
     <div className={`mt-3 space-y-2 ${animate ? "animate-result-in" : ""}`}>
       <div
@@ -2771,49 +3527,7 @@ function AllClearCard({
           </p>
         ) : null}
       </div>
-      {detailed || assessmentAction || assessmentSources ? (
-        <div>
-          <div
-            className="flex flex-wrap items-center gap-3 pt-2"
-            data-assessment-actions
-          >
-            {(detailed || assessmentSources) && (
-              <button
-                type="button"
-                aria-expanded={showAnalysis}
-                aria-controls={analysisId}
-                onClick={() => {
-                  setShowAnalysis(!showAnalysis);
-                  analysisReveal.revealAfterToggle(!showAnalysis);
-                }}
-                className="flex items-center gap-1.5 rounded-md py-2 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
-              >
-                <CollapseChevron open={showAnalysis} className="h-3.5 w-3.5" />
-                {detailed ? "Full analysis" : "Assessment details"}
-              </button>
-            )}
-            {assessmentAction && (
-              <div className="ml-auto">{assessmentAction}</div>
-            )}
-          </div>
-          <div id={analysisId} ref={analysisReveal.elementRef}>
-            <Collapse open={showAnalysis}>
-              <div className="border-t border-theme-border/60 px-3 py-2">
-                <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_p]:my-1.5 [&_p]:text-theme-text-secondary [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
-                  {detailed ? report : ""}
-                </AIMarkdown>
-                {assessmentSources}
-              </div>
-            </Collapse>
-          </div>
-        </div>
-      ) : null}
-      {showDisclaimer ? (
-        <div className="flex items-start gap-1 px-0.5 text-[11px] text-theme-text-tertiary">
-          <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
-          <span>AI-generated — verify if symptoms persist</span>
-        </div>
-      ) : null}
+      {trailing}
     </div>
   );
 }
@@ -2824,13 +3538,25 @@ function AllClearCard({
 function InconclusiveCard({
   diagnosis,
   animate,
+  storyInline = false,
+  revisedAfter,
+  assessmentLimits,
+  assessmentCopy,
 }: {
   diagnosis: Diagnosis;
   animate: boolean;
+  storyInline?: boolean;
+  revisedAfter?: string;
+  /** Reads Radar could not complete for this assessment; listed under Still open. */
+  assessmentLimits?: string[];
+  assessmentCopy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
 }) {
+  const storyShape = diagnosisHasStoryShape(diagnosis);
   const text =
-    diagnosis.report ||
-    "The investigation couldn't reach a clear conclusion — some information was unavailable or the evidence was ambiguous.";
+    (storyShape && !storyInline ? "" : storyPlainText(diagnosis.report)) ||
+    (storyShape
+      ? ""
+      : "The investigation couldn't reach a clear conclusion — some information was unavailable or the evidence was ambiguous.");
   return (
     <div className={`mt-3 space-y-2 ${animate ? "animate-result-in" : ""}`}>
       <div className="rounded-lg border border-theme-border bg-theme-elevated p-3">
@@ -2839,11 +3565,24 @@ function InconclusiveCard({
             <HelpCircle className="h-3.5 w-3.5" />
             Couldn&apos;t determine
           </div>
-          <CopyButton text={text} label="Copy assessment" />
+          {storyShape ? null : (
+            <CopyButton text={text} label="Copy assessment" />
+          )}
         </div>
-        <AIMarkdown className="text-sm text-theme-text-primary [overflow-wrap:anywhere] [&_code]:font-normal [&_li]:text-theme-text-primary [&_p]:my-1 [&_p]:text-theme-text-primary [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
-          {text}
-        </AIMarkdown>
+        {storyShape ? (
+          <AssessmentHeadline
+            diagnosis={diagnosis}
+            tone="inconclusive"
+            revisedAfter={revisedAfter}
+            limits={assessmentLimits}
+            copy={assessmentCopy}
+          />
+        ) : null}
+        {text ? (
+          <AIMarkdown className="mt-2 text-sm text-theme-text-primary [overflow-wrap:anywhere] [&_code]:font-normal [&_li]:text-theme-text-primary [&_p]:my-1 [&_p]:text-theme-text-primary [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
+            {text}
+          </AIMarkdown>
+        ) : null}
       </div>
       <div className="flex items-start gap-1 px-0.5 text-[11px] text-theme-text-tertiary">
         <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
@@ -3025,6 +3764,19 @@ const COMMAND_BINARIES = new Set([
   "skyhook",
 ]);
 
+/** The first sentence of a step, without its markdown, for a one-line row. */
+export function remediationHeadline(step: string): string {
+  const firstLine =
+    step
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("```")) ?? "";
+  const sentence = firstLine.split(/(?<=[.!?:])\s/)[0] ?? firstLine;
+  // A step written as "Confirm recovery:" expects its command to follow; as a
+  // folded title the colon dangles.
+  return sentence.replace(/`/g, "").replace(/\*\*/g, "").replace(/:$/, "");
+}
+
 /**
  * The commands inside a remediation step, in order: every fenced block and
  * every inline code span that reads as a shell invocation. A step's prose is
@@ -3057,25 +3809,48 @@ function looksLikeCommand(span: string): boolean {
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const copied = state === "copied";
   return (
     <Tooltip
-      content={copied ? "Copied" : label}
+      content={
+        state === "copied"
+          ? "Copied"
+          : state === "failed"
+            ? "Copy failed"
+            : label
+      }
       delay={100}
       wrapperClassName="shrink-0"
     >
       <button
-        onClick={() => {
-          navigator.clipboard?.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
+        onClick={async () => {
+          // Report what happened, not what was attempted: the write can be
+          // denied or unavailable, and "Copied" over an empty clipboard is worse
+          // than no button.
+          try {
+            if (!navigator.clipboard) throw new Error("clipboard unavailable");
+            await navigator.clipboard.writeText(text);
+            setState("copied");
+          } catch {
+            setState("failed");
+          }
+          setTimeout(() => setState("idle"), 1200);
         }}
         className="shrink-0 rounded p-1 text-theme-text-tertiary hover:bg-theme-hover hover:text-theme-text-primary"
-        aria-label={copied ? `${label} — copied` : label}
+        aria-label={
+          state === "copied"
+            ? `${label} — copied`
+            : state === "failed"
+              ? `${label} — copy failed`
+              : label
+        }
         aria-live="polite"
       >
         {copied ? (
           <Check className="h-3.5 w-3.5 text-emerald-400" />
+        ) : state === "failed" ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
         ) : (
           <Copy className="h-3.5 w-3.5" />
         )}

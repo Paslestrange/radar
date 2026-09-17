@@ -708,9 +708,10 @@ describe("tool row duration and failure reason", () => {
     expect(args?.[1]).toContain("flex-1");
     expect(args?.[1]).toContain("truncate");
     const reason = html.match(
-      /<span class="investigation-tool-reason ([^"]*)">([^<]*)</,
+      /<span class="investigation-tool-reason ([^"]*)"[^>]*>([^<]*)</,
     );
-    expect(reason?.[1]).toContain("shrink-0");
+    expect(reason?.[1]).toContain("min-w-0");
+    expect(reason?.[1]).toContain("truncate");
     expect(reason?.[2]).toBe(
       "resource not found: secret &quot;dev/does-not-exist&quot; not found",
     );
@@ -1152,7 +1153,7 @@ describe("ResultCard conclusion states", () => {
     expect(html).not.toContain("animation-delay");
   });
 
-  it("keeps only the recommended action in the first Findings scan", () => {
+  it("opens only the recommended action in the first Findings scan", () => {
     const html = renderToStaticMarkup(
       <ResultCard
         diagnosis={diagnosis({
@@ -1170,9 +1171,11 @@ describe("ResultCard conclusion states", () => {
     );
 
     expect(html).toContain("Push the missing image.");
-    expect(html).not.toContain("Inspect the registry.");
-    expect(html).not.toContain("Restart the rollout.");
-    expect(html).toContain("Show 2 more steps");
+    // The other steps fold to one readable row each rather than vanishing.
+    expect(html.match(/data-step-folded=/g)).toHaveLength(2);
+    expect(html).toContain("Inspect the registry.");
+    expect(html).toContain("Restart the rollout.");
+    expect(html).toContain("Expand all steps");
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain("grid-template-rows:0fr");
     expect(html).toContain("motion-reduce:transition-none");
