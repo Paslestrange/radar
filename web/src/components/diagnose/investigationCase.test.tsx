@@ -20,6 +20,7 @@ import {
   type InvestigationCaseResolution,
 } from "./investigationCase";
 import { AssessmentSources, ResultCard, assessmentSourceRows } from "./parts";
+import { namedInventoryRows } from "./investigationEvidence/bodies/inventory";
 import type { Diagnosis, DiagnosisEvidenceItem } from "../../api/diagnose";
 
 const onViewSource = vi.fn();
@@ -240,6 +241,634 @@ describe("agent case placement (D-1, D-1b)", () => {
       "card",
       "card",
     ]);
+  });
+
+  it("places a resource-shaped result cited as 'resource': a Helm release, a permissions check, a neighborhood, a packages entry", () => {
+    const helmRef = evidenceRef("h", "a");
+    const permRef = evidenceRef("p", "b");
+    const graphRef = evidenceRef("g", "c");
+    const pkgRef = evidenceRef("k", "d");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "helm",
+        "get_helm_release",
+        {
+          name: "shop",
+          namespace: "shop",
+          chart: "shop",
+          chartVersion: "1.4.2",
+          status: "deployed",
+          revision: 7,
+          updated: "2026-09-07T07:00:00Z",
+          resources: [
+            {
+              kind: "Deployment",
+              apiVersion: "apps/v1",
+              name: "api",
+              namespace: "shop",
+            },
+          ],
+        },
+        {
+          evidenceRef: helmRef,
+          summary: JSON.stringify({ namespace: "shop", name: "shop" }),
+        },
+      ),
+      tool(
+        "perm",
+        "get_subject_permissions",
+        {
+          subject: {
+            kind: "ServiceAccount",
+            namespace: "shop",
+            name: "default",
+          },
+          usedByPods: ["api-abc"],
+          bindings: [],
+          flatRules: [],
+        },
+        {
+          evidenceRef: permRef,
+          summary: JSON.stringify({
+            kind: "ServiceAccount",
+            namespace: "shop",
+            name: "default",
+          }),
+        },
+      ),
+      tool(
+        "graph",
+        "get_neighborhood",
+        {
+          root: { kind: "Service", group: "", namespace: "shop", name: "api" },
+          subgraph: {
+            nodes: [
+              {
+                id: "service/shop/api",
+                kind: "Service",
+                name: "api",
+                data: { namespace: "shop" },
+              },
+              {
+                id: "deployment/shop/api",
+                kind: "Deployment",
+                name: "api",
+                data: { namespace: "shop" },
+              },
+            ],
+            edges: [
+              {
+                source: "service/shop/api",
+                target: "deployment/shop/api",
+                type: "exposes",
+              },
+            ],
+          },
+          truncated: false,
+        },
+        {
+          evidenceRef: graphRef,
+          summary: JSON.stringify({
+            kind: "Service",
+            namespace: "shop",
+            name: "api",
+          }),
+        },
+      ),
+      tool(
+        "pkgs",
+        "list_packages",
+        {
+          packages: [
+            {
+              chart: "shop",
+              namespace: "shop",
+              releaseName: "shop",
+              version: "1.4.2",
+              health: { status: "healthy" },
+              sources: ["H", "F"],
+            },
+          ],
+          sourceLegend: { H: "Helm", F: "Flux" },
+        },
+        { evidenceRef: pkgRef, summary: JSON.stringify({}) },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(helmRef, "context", "Deployed at revision 7.", {
+            kind: "HelmRelease",
+            namespace: "shop",
+            name: "shop",
+            observation: "resource",
+          }),
+          linked(permRef, "context", "Only implicit discovery grants.", {
+            kind: "ServiceAccount",
+            namespace: "shop",
+            name: "default",
+            observation: "resource",
+          }),
+          linked(graphRef, "context", "The Service is the only neighbour.", {
+            kind: "Service",
+            namespace: "shop",
+            name: "api",
+            observation: "resource",
+          }),
+          linked(
+            pkgRef,
+            "context",
+            "The package is healthy from every source.",
+            {
+              group: "helm.toolkit.fluxcd.io",
+              kind: "HelmRelease",
+              namespace: "shop",
+              name: "shop",
+              observation: "resource",
+            },
+          ),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items.map((item) => item.placement)).toEqual([
+      "card",
+      "card",
+      "card",
+      "card",
+    ]);
+  });
+
+  it("does not hold the evidence word against a call whose only observation is a receipt", () => {
+    const metricsRef = evidenceRef("m", "a");
+    const upgradeRef = evidenceRef("u", "b");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "names",
+        "discover_metrics",
+        {
+          match: "container_restarts",
+          count: 0,
+          metrics: [],
+          truncated: false,
+        },
+        {
+          evidenceRef: metricsRef,
+          summary: JSON.stringify({ match: "container_restarts" }),
+        },
+      ),
+      tool(
+        "upgrade",
+        "get_cluster_upgrade_readiness",
+        {
+          currentVersion: "1.35.7",
+          targetVersion: "1.36",
+          check: {
+            id: "webhooks",
+            title: "Admission webhooks",
+            category: "api",
+            status: "fail",
+            findings: [
+              {
+                title: "Webhook has no failure policy",
+                level: "blocker",
+                resource: {
+                  kind: "ValidatingWebhookConfiguration",
+                  name: "kyverno",
+                },
+              },
+            ],
+          },
+        },
+        {
+          evidenceRef: upgradeRef,
+          summary: JSON.stringify({ targetVersion: "1.36" }),
+        },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(
+            metricsRef,
+            "context",
+            "No metric name contains container_restarts.",
+            {
+              kind: "Pod",
+              namespace: "shop",
+              name: "api-abc",
+              observation: "metrics",
+            },
+          ),
+          linked(
+            upgradeRef,
+            "context",
+            "None of the findings concern this workload.",
+            {
+              group: "apps",
+              kind: "Deployment",
+              namespace: "shop",
+              name: "api",
+              observation: "resource",
+            },
+          ),
+          linked(ref, "symptom", "The bundle's events.", {
+            kind: "Pod",
+            namespace: "shop",
+            name: "api-abc",
+            observation: "startup",
+          }),
+        ],
+      },
+      0,
+    );
+    // The bundle yields many observations, so a word it cannot satisfy still
+    // leaves that item at its source.
+    expect(resolved.items.map((item) => item.placement)).toEqual([
+      "card",
+      "card",
+      "source",
+    ]);
+  });
+
+  it("holds a bare read to the evidence word: 'logs' does not name a resource card", () => {
+    const readRef = evidenceRef("r", "a");
+    const projection = project(
+      tool("read", "get_resource", deployment, {
+        evidenceRef: readRef,
+        summary: JSON.stringify({
+          kind: "deployment",
+          namespace: "shop",
+          name: "api",
+        }),
+      }),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(readRef, "context", "Zero ready.", {
+            group: "apps",
+            kind: "Deployment",
+            namespace: "shop",
+            name: "api",
+            observation: "logs",
+          }),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items[0].placement).toBe("source");
+  });
+
+  it("leads a cited package listing with one row when two aliases name it, and holds a Package subject to its namespace", () => {
+    const pkgRef = evidenceRef("k", "e");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "pkgs",
+        "list_packages",
+        {
+          packages: [
+            {
+              chart: "podinfo",
+              namespace: "prod",
+              releaseName: "podinfo",
+              version: "6.15.0",
+              health: { status: "healthy" },
+              sources: ["H"],
+            },
+            {
+              chart: "redis",
+              namespace: "prod",
+              releaseName: "redis",
+              version: "1.0.0",
+              health: { status: "healthy" },
+              sources: ["H"],
+            },
+          ],
+          sourceLegend: { H: "Helm" },
+        },
+        { evidenceRef: pkgRef, summary: JSON.stringify({}) },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(pkgRef, "context", "Declared by Flux.", {
+            group: "helm.toolkit.fluxcd.io",
+            kind: "HelmRelease",
+            namespace: "flux-system",
+            name: "podinfo",
+            observation: "resource",
+          }),
+          linked(pkgRef, "context", "Installed by Helm.", {
+            kind: "HelmRelease",
+            namespace: "staging",
+            name: "podinfo",
+            observation: "resource",
+          }),
+          linked(pkgRef, "context", "Another namespace's package.", {
+            kind: "Package",
+            namespace: "staging",
+            name: "podinfo",
+            observation: "resource",
+          }),
+        ],
+      },
+      0,
+    );
+    // All three bind to the listing; only the two declaring-object aliases
+    // name the prod row, and it leads the list once.
+    expect(resolved.items.map((item) => item.placement)).toEqual([
+      "card",
+      "card",
+      "card",
+    ]);
+    const listing = projection.groups.find(
+      (group) => group.latest.data.type === "inventory",
+    )!.latest.data;
+    if (listing.type !== "inventory") throw new Error("expected inventory");
+    expect(
+      namedInventoryRows(listing.resources, resolved.items).map(
+        (named) => named.matches,
+      ),
+    ).toEqual([1, 1, 0]);
+    expect(
+      namedInventoryRows(listing.resources, [...resolved.items].reverse()).map(
+        (named) => named.matches,
+      ),
+    ).toEqual([0, 1, 1]);
+    const html = render(projection, resolved);
+    const cited = html.match(/data-inventory-row="cited"/g) ?? [];
+    expect(cited).toHaveLength(1);
+    const marker = html.indexOf('data-inventory-row="cited"');
+    expect(marker).toBeGreaterThan(-1);
+    expect(marker).toBeLessThan(html.indexOf("prod/redis"));
+    expect(html.match(/prod\/podinfo/g)).toHaveLength(1);
+  });
+
+  it("reaches a posture finding through the workload that owns its resource, and holds a mixed-kind card to the names it holds", () => {
+    const upgradeRef = evidenceRef("u", "c");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "upgrade",
+        "get_cluster_upgrade_readiness",
+        {
+          currentVersion: "1.35.7",
+          targetVersion: "1.36",
+          check: {
+            id: "removed-apis",
+            title: "Removed APIs",
+            category: "api",
+            status: "fail",
+            findings: [
+              {
+                title: "Uses autoscaling/v2beta2",
+                level: "blocker",
+                resource: {
+                  kind: "HorizontalPodAutoscaler",
+                  namespace: "shop",
+                  name: "api-hpa",
+                },
+                managedBy: {
+                  kind: "Deployment",
+                  group: "apps",
+                  namespace: "shop",
+                  name: "api",
+                },
+              },
+              {
+                title: "Uses networking/v1beta1",
+                level: "warning",
+                resource: { kind: "Ingress", namespace: "shop", name: "api" },
+                managedBy: {
+                  kind: "Deployment",
+                  group: "apps",
+                  namespace: "shop",
+                  name: "api",
+                },
+              },
+            ],
+          },
+        },
+        {
+          evidenceRef: upgradeRef,
+          summary: JSON.stringify({
+            targetVersion: "1.36",
+            check: "removed-apis",
+          }),
+        },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(
+            upgradeRef,
+            "context",
+            "The HPA and the Ingress need new APIs.",
+            {
+              group: "apps",
+              kind: "Deployment",
+              namespace: "shop",
+              name: "api",
+              observation: "resource",
+            },
+          ),
+          linked(upgradeRef, "context", "Names nothing on the card.", {
+            kind: "Service",
+            namespace: "shop",
+            name: "api",
+            observation: "resource",
+          }),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items.map((item) => item.placement)).toEqual([
+      "card",
+      "source",
+    ]);
+  });
+
+  it("reaches a pod ranking through the workload its marked pods belong to", () => {
+    const rankRef = evidenceRef("t", "b");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "top",
+        "top_resources",
+        {
+          kind: "pods",
+          sort: "memory",
+          metricsAvailable: true,
+          items: [
+            {
+              kind: "Pod",
+              namespace: "shop",
+              name: "worker-1",
+              cpuMilli: 9,
+              memoryMi: 400,
+            },
+            {
+              kind: "Pod",
+              namespace: "shop",
+              name: "api-abc",
+              owner: { group: "apps", kind: "Deployment", name: "api" },
+              cpuMilli: 5,
+              memoryMi: 300,
+            },
+          ],
+        },
+        {
+          evidenceRef: rankRef,
+          summary: JSON.stringify({
+            kind: "pods",
+            namespace: "shop",
+            sort: "memory",
+          }),
+        },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(rankRef, "context", "The API pod is second by memory.", {
+            group: "apps",
+            kind: "Deployment",
+            namespace: "shop",
+            name: "api",
+            observation: "resource",
+          }),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items[0].placement).toBe("card");
+  });
+
+  it("marks the investigated workload's own row in a workload ranking", () => {
+    const rankRef = evidenceRef("t", "a");
+    const projection = project(
+      tool(
+        "top",
+        "top_resources",
+        {
+          kind: "workloads",
+          sort: "cpu",
+          namespace: "shop",
+          metricsAvailable: true,
+          workloads: [
+            {
+              kind: "Deployment",
+              namespace: "shop",
+              name: "web",
+              cpuMilli: 9,
+              memoryMi: 40,
+            },
+            {
+              kind: "Deployment",
+              namespace: "shop",
+              name: "api",
+              cpuMilli: 5,
+              memoryMi: 30,
+            },
+          ],
+        },
+        {
+          evidenceRef: rankRef,
+          summary: JSON.stringify({ kind: "workloads", namespace: "shop" }),
+        },
+      ),
+    );
+    const group = projection.groups.find(
+      (g) => g.latest.data.type === "ranking",
+    )!;
+    const data = group.latest.data;
+    if (data.type !== "ranking") throw new Error("expected ranking");
+    expect(data.rows.map((row) => row.target)).toEqual([false, true]);
+    expect(group.latest.relevance).toBe("producer-related");
+  });
+
+  it("places a declaring-object citation on a package listing scoped to the workload's namespace", () => {
+    const pkgRef = evidenceRef("k", "f");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "pkgs",
+        "list_packages",
+        {
+          packages: [
+            {
+              chart: "shop",
+              namespace: "shop",
+              releaseName: "shop",
+              version: "1.4.2",
+              health: "healthy",
+              sources: ["F"],
+            },
+          ],
+          sourceLegend: { F: "Flux" },
+        },
+        { evidenceRef: pkgRef, summary: JSON.stringify({ namespace: "shop" }) },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(pkgRef, "context", "Declared by Flux.", {
+            group: "helm.toolkit.fluxcd.io",
+            kind: "HelmRelease",
+            namespace: "flux-system",
+            name: "shop",
+            observation: "resource",
+          }),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items[0].placement).toBe("card");
+  });
+
+  it("keeps an ordinary listing's held entry to the listing's namespace", () => {
+    const listRef = evidenceRef("c", "e");
+    const projection = project(
+      tool("diag", "diagnose", diagnoseBundle, { evidenceRef: ref }),
+      tool(
+        "cms",
+        "list_resources",
+        [{ kind: "ConfigMap", name: "kube-root-ca.crt" }],
+        {
+          evidenceRef: listRef,
+          summary: JSON.stringify({ kind: "configmaps", namespace: "shop" }),
+        },
+      ),
+    );
+    const resolved = resolveInvestigationCase(
+      projection,
+      {
+        evidence: [
+          linked(listRef, "context", "Another namespace's CA bundle.", {
+            kind: "ConfigMap",
+            namespace: "prod",
+            name: "kube-root-ca.crt",
+            observation: "resource",
+          }),
+        ],
+      },
+      0,
+    );
+    expect(resolved.items[0].placement).toBe("source");
   });
 
   it("binds a Pod subject to events only for the target's own pod or a pod an event names whole", () => {

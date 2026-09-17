@@ -6,7 +6,7 @@ import {
   type InvestigationResourceSummary,
   type InvestigationEvidenceSource,
 } from "..";
-import { sameKind } from "../../investigationCase";
+import { listingRowNamesSubject, sameKind } from "../../investigationCase";
 import type { EvidenceDataOf } from "../cardParts";
 
 // The rows the citations on a card name, in citation order: one row when the
@@ -42,17 +42,26 @@ export function namedInventoryRows(
     if (!subject?.name) continue;
     // Agents write namespace "" for a cluster-scoped kind; that states none.
     const namespace = subject.namespace || undefined;
-    const key = `${namespace ?? ""}/${subject.name}`;
+    // Kind is part of what a subject names once a package can be named by
+    // its declaring object: "Package staging/podinfo" and "HelmRelease
+    // staging/podinfo" ask different questions of the same listing.
+    const key = `${subject.kind}/${namespace ?? ""}/${subject.name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     // A row without a namespace lives in the listing's scope, or in none
     // (a cluster-scoped kind); neither satisfies a namespace the citation
-    // states unless it is the scope itself.
+    // states unless it is the scope itself. A package row's namespace is
+    // where the package runs, while the object the agent names as declaring
+    // it (a Flux HelmRelease in flux-system) lives elsewhere, so that
+    // namespace is not held against a package; a subject that names the
+    // package as a Package means the namespace it says.
+    const declaringObject = (resource: InvestigationResourceSummary) =>
+      resource.kind === "Package" && !sameKind(subject.kind, "Package");
     const matches = resources.filter(
       (resource) =>
-        resource.name === subject.name &&
-        sameKind(resource.kind, subject.kind) &&
+        listingRowNamesSubject(resource, subject) &&
         (namespace === undefined ||
+          declaringObject(resource) ||
           (resource.namespace ?? scopeNamespace) === namespace),
     );
     out.push({
@@ -68,15 +77,19 @@ export function namedInventoryRows(
 export function InventoryRow({
   resource,
   divider = false,
+  cited = false,
 }: {
   resource: InvestigationResourceSummary;
   divider?: boolean;
+  cited?: boolean;
 }) {
   return (
     <div
+      data-inventory-row={cited ? "cited" : undefined}
       className={clsx(
         "flex min-w-0 items-center gap-2 px-2.5 py-1.5",
         divider && "border-t border-theme-border/60",
+        cited && "bg-theme-hover/40",
       )}
     >
       <StatusDot
@@ -96,6 +109,11 @@ export function InventoryRow({
             {resource.issue}
           </span>
         ) : null}
+        {resource.match ? (
+          <span className="block truncate font-mono text-[11px] text-theme-text-tertiary">
+            {resource.match}
+          </span>
+        ) : null}
       </span>
       {resource.ready || resource.status ? (
         <span className="ml-auto shrink-0 font-mono text-xs text-theme-text-tertiary">
@@ -111,14 +129,28 @@ export function InventoryRow({
   );
 }
 
-export function InventoryBody({ data }: { data: EvidenceDataOf<"inventory"> }) {
+// The rows the card's citations name lead the listing, so the entry a claim
+// is about is in view without scrolling a long inventory for it.
+export function InventoryBody({
+  data,
+  cited = [],
+}: {
+  data: EvidenceDataOf<"inventory">;
+  cited?: readonly InvestigationResourceSummary[];
+}) {
+  const lead = [...new Set(cited)];
+  const rows = [
+    ...lead,
+    ...data.resources.filter((resource) => !lead.includes(resource)),
+  ];
   return (
     <div className="max-h-72 overflow-y-auto rounded-md border border-theme-border">
-      {data.resources.map((resource, index) => (
+      {rows.map((resource, index) => (
         <InventoryRow
           key={`${resource.kind}-${resource.namespace ?? ""}-${resource.name}`}
           resource={resource}
           divider={index > 0}
+          cited={lead.includes(resource)}
         />
       ))}
     </div>

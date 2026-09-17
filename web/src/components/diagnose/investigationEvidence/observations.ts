@@ -17,6 +17,7 @@ import {
 } from "../diagnoseEvidenceTypes";
 import { investigationResourceEvidenceSummary } from "../investigationResourceEvidenceModel";
 import { kindToPluralWithGroup } from "../../../utils/navigation";
+import { pluralToKind } from "@skyhook-io/k8s-ui";
 import { stableHash } from "./identity";
 import { nonEmptyString, parseJSON, record, stringArray } from "./parse";
 import {
@@ -185,11 +186,21 @@ const INVESTIGATION_RESULT_LABELS: Readonly<Record<string, string>> = {
   get_helm_release: "Helm release",
   get_subject_permissions: "Permissions",
   query_prometheus: "Prometheus query",
+  top_resources: "Resource ranking",
+  get_cluster_audit: "Posture findings",
+  get_cluster_upgrade_readiness: "Upgrade readiness",
+  list_helm_releases: "Helm releases",
+  list_packages: "Installed packages",
+  search: "Search results",
+  discover_metrics: "Metric discovery",
 };
 export function investigationResultLabel(
   source: InvestigationEvidenceSource,
 ): string {
   return INVESTIGATION_RESULT_LABELS[source.tool] ?? "Investigation result";
+}
+export function sameKind(left: string, right: string): boolean {
+  return pluralToKind(left).toLowerCase() === pluralToKind(right).toLowerCase();
 }
 export function resourceMatchesTarget(
   target: InvestigationEvidenceTarget,

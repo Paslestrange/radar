@@ -1,5 +1,3 @@
-import { pluralToKind } from "@skyhook-io/k8s-ui";
-
 import type {
   DiagnosisEvidenceItem,
   DiagnosisEvidenceRole,
@@ -10,6 +8,8 @@ import {
   investigationEvidenceSubjectRef,
   investigationSourceArgs,
   isInvestigationEvidenceRef,
+  sameKind,
+  type InvestigationEvidenceData,
   type InvestigationEvidenceGroup,
   type InvestigationEvidenceObservation,
   type InvestigationEvidenceProjection,
@@ -140,22 +140,23 @@ export function resolveInvestigationCase(
       source,
       placement: "source",
     };
+    const produced = projection.groups.flatMap((group) =>
+      group.observations
+        .filter((observation) => observation.source.id === source.id)
+        .map((observation) => ({ group, observation })),
+    );
     const candidates = subjectUnusable
       ? []
-      : projection.groups.flatMap((group) =>
-          group.observations
-            .filter(
-              (observation) =>
-                observation.source.id === source.id &&
-                (!subject ||
-                  observationMatchesSubject(
-                    group,
-                    observation,
-                    subject,
-                    targetPods,
-                  )),
-            )
-            .map((observation) => ({ group, observation })),
+      : produced.filter(
+          ({ group, observation }) =>
+            !subject ||
+            observationMatchesSubject(
+              group,
+              observation,
+              subject,
+              targetPods,
+              produced.length === 1,
+            ),
         );
     if (candidates.length === 1) {
       const { group, observation } = candidates[0];
@@ -276,6 +277,19 @@ function observationSubjectIdentity(
   const args = investigationSourceArgs(observation.source);
   // A listing whose call names no kind (list_namespaces) is still a listing
   // of the one kind its rows carry.
+  // A ranking is a listing of what it ranked; a posture card is a listing of
+  // the resources its findings are about.
+  if (data.type === "ranking" || data.type === "posture") {
+    const rows = data.type === "ranking" ? data.rows : data.findings;
+    const kinds = new Set(rows.map((row) => row.kind));
+    if (kinds.size !== 1) return undefined;
+    return {
+      kind: [...kinds][0],
+      namespace: nonEmptyString(args?.namespace) ? args.namespace : undefined,
+      name: "",
+      listing: true,
+    };
+  }
   if (data.type === "inventory" && !nonEmptyString(args?.kind)) {
     const kinds = new Set(data.resources.map((resource) => resource.kind));
     if (kinds.size !== 1) return undefined;
@@ -311,31 +325,75 @@ function isBuiltInGroup(group: string): boolean {
   return LEGACY_BUILT_IN_GROUPS.has(group) || group.endsWith(".k8s.io");
 }
 
-export function sameKind(left: string, right: string): boolean {
-  return pluralToKind(left).toLowerCase() === pluralToKind(right).toLowerCase();
+export { sameKind };
+
+/**
+ * Whether a listing row is the entry a citation names. A package row carries
+ * a kind of Radar's own, so the agent names it by the kind it knows the
+ * package as (the Flux HelmRelease, the chart); every other row is named by
+ * its kind.
+ */
+export function listingRowNamesSubject(
+  row: { kind: string; name: string },
+  subject: { kind: string; name?: string },
+): boolean {
+  return (
+    subject.name !== undefined &&
+    row.name === subject.name &&
+    (row.kind === "Package" || sameKind(row.kind, subject.kind))
+  );
 }
+
+// The vocabulary the agent places with names evidence kinds a reader would
+// distinguish (logs, events, changes, metrics, alerts, issue); everything a
+// call returns about a resource is "resource" to it, whether Radar draws that
+// as a resource card, a listing, a ranking, a posture card, a Helm release, a
+// permissions check or a neighborhood. The kinds a diagnose bundle yields
+// beside its resource (startup, crash, dns, network, receipts) stay out so
+// "resource" still picks one observation of that bundle.
+const RESOURCE_SHAPED: ReadonlySet<InvestigationEvidenceData["type"]> = new Set<
+  InvestigationEvidenceData["type"]
+>([
+  "resource",
+  "inventory",
+  "ranking",
+  "posture",
+  "helm",
+  "permissions",
+  "topology",
+  "relationships",
+]);
 
 /**
  * A discriminator the agent omits is a wildcard, and so is one the producer
  * did not state; every discriminator both sides supply must match. Uniqueness
  * of the match, not completeness of the subject, is what places a claim.
+ *
+ * The evidence word tells observations of one call apart, and a receipt is
+ * not a kind of its own: it is what a call of any kind returned when it found
+ * nothing (a metric search, a scan with nothing about the target). A call
+ * whose only observation is a receipt is not held to the word; what the
+ * subject names still has to match.
  */
 function observationMatchesSubject(
   group: InvestigationEvidenceGroup,
   observation: InvestigationEvidenceObservation,
   subject: DiagnosisEvidenceSubject,
   targetPods: ReadonlySet<string>,
+  sole: boolean,
 ): boolean {
-  if (subject.observation !== undefined) {
+  const soleReceipt = sole && observation.data.type === "receipt";
+  if (subject.observation !== undefined && !soleReceipt) {
     // A diagnose bundle captures several vitals charts for one resource, so
     // "metrics" alone cannot name one; "metrics:<category>" picks the chart
     // whose identity ends in that category. An agent-run query is one chart,
     // so a qualifier on it carries no meaning.
     const [kind, qualifier] = subject.observation.toLowerCase().split(":", 2);
-    // A listing is resources too: "resource" names an inventory card as well.
-    const inventoryAsResource =
-      kind === "resource" && observation.data.type === "inventory";
-    if (kind !== observation.data.type && !inventoryAsResource) return false;
+    if (
+      kind !== observation.data.type &&
+      !(kind === "resource" && RESOURCE_SHAPED.has(observation.data.type))
+    )
+      return false;
     if (
       qualifier !== undefined &&
       observation.data.type === "metrics" &&
@@ -371,6 +429,36 @@ function observationIdentities(
 ): ObservationSubjectIdentity[] {
   const stated = observationSubjectIdentity(observation);
   const identities = stated ? [stated] : [];
+  // A ranking is also each row it ranks and the workload each pod belongs
+  // to; a posture card each resource its findings name and the workload that
+  // owns it: a citation of the workload reaches its pods' rows and the
+  // finding on its HPA, and a card of mixed kinds accepts no name it does
+  // not hold.
+  if (
+    observation.data.type === "ranking" ||
+    observation.data.type === "posture"
+  ) {
+    const rows =
+      observation.data.type === "ranking"
+        ? observation.data.rows.flatMap((row) =>
+            row.owner ? [row, row.owner] : [row],
+          )
+        : observation.data.findings.flatMap((finding) =>
+            finding.managedBy ? [finding, finding.managedBy] : [finding],
+          );
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const key = `${row.kind}/${row.namespace ?? ""}/${row.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      identities.push({
+        kind: row.kind,
+        group: "group" in row ? row.group : undefined,
+        namespace: row.namespace ?? "",
+        name: row.name,
+      });
+    }
+  }
   if (observation.data.type === "logs" && stated) {
     const args = investigationSourceArgs(observation.source);
     if (args && nonEmptyString(args.kind) && nonEmptyString(args.name)) {
@@ -432,7 +520,15 @@ function identityMatchesSubject(
       ))
   )
     return true;
-  if (!sameKind(identity.kind, subject.kind)) return false;
+  // Naming an entry the listing holds is naming the listing, whatever kind
+  // the listing itself goes by.
+  const namesHeldEntry =
+    identity.listing &&
+    observation.data.type === "inventory" &&
+    observation.data.resources.some((resource) =>
+      listingRowNamesSubject(resource, subject),
+    );
+  if (!namesHeldEntry && !sameKind(identity.kind, subject.kind)) return false;
   // A subject with no name (a listing cited for what it does not contain) is
   // a wildcard that uniqueness still gates. A listing has no name of its own; the agent naming the entry it means
   // ("ConfigMap kube-root-ca.crt" in the ConfigMaps of a namespace) still
@@ -456,7 +552,19 @@ function identityMatchesSubject(
   ) {
     return false;
   }
+  // The object declaring a package lives where it lives, not in the
+  // listing's scope; every other held entry is named in the scope it has.
+  const namesDeclaredPackage =
+    namesHeldEntry &&
+    !sameKind(subject.kind, "Package") &&
+    observation.data.type === "inventory" &&
+    observation.data.resources.some(
+      (resource) =>
+        resource.kind === "Package" &&
+        listingRowNamesSubject(resource, subject),
+    );
   if (
+    !namesDeclaredPackage &&
     subject.namespace !== undefined &&
     identity.namespace !== undefined &&
     subject.namespace !== identity.namespace
