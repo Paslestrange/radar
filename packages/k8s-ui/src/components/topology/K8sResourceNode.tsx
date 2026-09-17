@@ -173,8 +173,10 @@ function getIssueTooltip(issue: string | undefined): React.ReactNode {
 // a multi-port Service's other ports are visible without opening the detail
 // page. Formatting (hide targetPort when it matches port) mirrors
 // ServicePortCards in ServiceRenderer.tsx so a Service's ports read the same
-// whether glanced at in the graph or opened in the full resource view.
-function servicePortsTooltip(ports: ServicePortEntry[]): React.ReactNode | null {
+// whether glanced at in the graph or opened in the full resource view. Exported
+// because the GitOps resource tree's Service node summarises ports the same way
+// and needs the same hover to reach the ones the summary drops.
+export function servicePortsTooltip(ports: ServicePortEntry[]): React.ReactNode | null {
   if (ports.length < 2) return null;
   return (
     <div className="max-w-xs space-y-0.5">
