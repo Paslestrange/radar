@@ -9,6 +9,7 @@ import {
   SearchBox,
   SelectMenu,
   pluralize,
+  useDisclosure,
 } from '@skyhook-io/k8s-ui'
 import { Badge } from '@skyhook-io/k8s-ui/components/ui/Badge'
 import {
@@ -85,11 +86,6 @@ const ACTION_META: Record<
   'increase' | 'reduction' | 'review',
   { label: string; severity: 'warning' | 'info' | 'neutral'; helper: string }
 > = {
-  reduction: {
-    label: 'Reduce requests',
-    severity: RIGHTSIZING_ACTION_SEVERITY.reduction,
-    helper: 'Reclaim meaningful capacity',
-  },
   increase: {
     label: 'Increase or add',
     severity: RIGHTSIZING_ACTION_SEVERITY.increase,
@@ -99,6 +95,11 @@ const ACTION_META: Record<
     label: 'Review first',
     severity: RIGHTSIZING_ACTION_SEVERITY.review,
     helper: 'Check safety signals or workloads with no replicas',
+  },
+  reduction: {
+    label: 'Reduce requests',
+    severity: RIGHTSIZING_ACTION_SEVERITY.reduction,
+    helper: 'Reclaim meaningful capacity',
   },
 }
 
@@ -330,12 +331,13 @@ export function RightsizingScanView({ namespaces }: RightsizingScanViewProps) {
               <Notice text="Scanning the current scope. Previous results remain visible until the scan completes." />
             )}
             <ScanSummary
+              namespaces={namespaces}
               result={result}
               counts={counts}
               selected={classFilter}
               onSelect={(value) => setFilter('rfClass', value === 'actions' ? undefined : value)}
             />
-            <ScanNotices result={result} rows={rows} />
+            <ScanNotices key={result.scannedAt} result={result} />
             {result.reason === 'only_daemonsets_without_nodes' ? (
               <EmptyState
                 variant="card"
@@ -368,31 +370,17 @@ export function RightsizingScanView({ namespaces }: RightsizingScanViewProps) {
                   active={activeFilters}
                 />
                 {filteredRows.length === 0 ? (
-                  <EmptyState
-                    tone="filtered"
-                    headline={
-                      onlySystemRowsAreHidden
-                        ? 'System workloads are hidden'
-                        : 'No results match the current filters'
-                    }
-                    body={
-                      onlySystemRowsAreHidden
-                        ? 'This scope contains only Kubernetes system workloads. Include them to review platform requests.'
-                        : 'Choose another result type or clear a filter.'
-                    }
-                    action={
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onlySystemRowsAreHidden ? setFilter('rfScope', 'all') : clearFilters()
-                        }
-                        className="badge badge-sm border border-theme-border bg-theme-elevated text-theme-text-primary"
-                      >
-                        {onlySystemRowsAreHidden
-                          ? 'Include system workloads'
-                          : 'Show recommended actions'}
-                      </button>
-                    }
+                  <ScanEmptyState
+                    counts={counts}
+                    classFilter={classFilter}
+                    hasResultFilters={Boolean(search || kindFilter || namespaceFilter)}
+                    onlySystemRowsAreHidden={onlySystemRowsAreHidden}
+                    hasQueryErrors={scopeRows.some(
+                      (row) => row.cpu?.queryError || row.memory?.queryError,
+                    )}
+                    onSelect={(value) => setFilter('rfClass', value)}
+                    onClear={clearFilters}
+                    onIncludeSystem={() => setFilter('rfScope', 'all')}
                   />
                 ) : (
                   <div>
@@ -437,6 +425,77 @@ export function RightsizingScanView({ namespaces }: RightsizingScanViewProps) {
   )
 }
 
+export function ScanEmptyState({
+  counts,
+  classFilter,
+  hasResultFilters,
+  onlySystemRowsAreHidden,
+  hasQueryErrors,
+  onSelect,
+  onClear,
+  onIncludeSystem,
+}: {
+  counts: ReturnType<typeof scanClassCounts>
+  classFilter: ClassFilter
+  hasResultFilters: boolean
+  onlySystemRowsAreHidden: boolean
+  hasQueryErrors: boolean
+  onSelect: (value: ScanClass) => void
+  onClear: () => void
+  onIncludeSystem: () => void
+}) {
+  let headline = 'No results match the current filters'
+  let body = 'Choose another result type or clear a filter.'
+  let actionLabel = 'Clear filters'
+  let onAction = onClear
+  if (onlySystemRowsAreHidden) {
+    headline = 'System workloads are hidden'
+    body =
+      'This scope contains only Kubernetes system workloads. Include them to review platform requests.'
+    actionLabel = 'Include system workloads'
+    onAction = onIncludeSystem
+  } else if (
+    classFilter === 'actions' &&
+    !hasResultFilters &&
+    counts.increase + counts.reduction + counts.review === 0
+  ) {
+    if (counts.need_data > 0) {
+      headline =
+        counts.in_range > 0
+          ? 'No actionable changes in available evidence'
+          : 'Not enough evidence for recommendations'
+      body =
+        counts.in_range > 0
+          ? `${pluralize(counts.in_range, 'container')} had no meaningful request changes; ${pluralize(counts.need_data, 'container')} still ${counts.need_data === 1 ? 'needs' : 'need'} evidence. This is not a complete assessment.`
+          : hasQueryErrors
+            ? 'Some metrics queries failed. Inspect affected containers, then retry the scan or select fewer namespaces in the top bar.'
+            : 'There is not enough usable CPU and memory history to recommend changes yet. Inspect the containers to see which resource needs more history.'
+      actionLabel = 'View containers needing evidence'
+      onAction = () => onSelect('need_data')
+    } else {
+      headline = 'No actionable changes'
+      body = `No meaningful request changes were found among the ${pluralize(counts.in_range, 'evaluated container')}. This does not assess workloads outside the scan coverage.`
+      actionLabel = 'View evaluated containers'
+      onAction = () => onSelect('in_range')
+    }
+  }
+  return (
+    <EmptyState
+      headline={headline}
+      body={body}
+      action={
+        <button
+          type="button"
+          onClick={onAction}
+          className="badge badge-sm border border-theme-border bg-theme-elevated text-theme-text-primary"
+        >
+          {actionLabel}
+        </button>
+      }
+    />
+  )
+}
+
 function FirstRunState({ namespaces, onRun }: { namespaces: string[]; onRun: () => void }) {
   const scope =
     namespaces.length === 0
@@ -466,21 +525,28 @@ function FirstRunState({ namespaces, onRun }: { namespaces: string[]; onRun: () 
   )
 }
 
-function ScanSummary({
+export function ScanSummary({
+  namespaces,
   result,
   counts,
   selected,
   onSelect,
 }: {
+  namespaces: string[]
   result: ScanResult
   counts: ReturnType<typeof scanClassCounts>
   selected: ClassFilter
   onSelect: (value: ClassFilter) => void
 }) {
-  const evaluated = result.coverage.workloadsEvaluated ?? result.workloads.length
-  const discovered = result.coverage.workloadsDiscovered ?? result.workloads.length
   return (
     <section className="rounded-xl border border-theme-border bg-theme-surface p-4 shadow-theme-sm">
+      <p className="mb-3 break-words text-xs text-theme-text-secondary">
+        Scanned scope:{' '}
+        <span className="font-medium text-theme-text-primary">
+          {namespaces.length ? namespaces.join(', ') : 'All visible namespaces'}
+        </span>
+        <span className="text-theme-text-tertiary"> · Change scan scope in the top bar</span>
+      </p>
       <div className="grid gap-2 md:grid-cols-3">
         {(Object.keys(ACTION_META) as Array<keyof typeof ACTION_META>).map((key) => {
           const meta = ACTION_META[key]
@@ -494,7 +560,7 @@ function ScanSummary({
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium text-theme-text-primary">{meta.label}</span>
                 <Badge severity={meta.severity} size="sm">
-                  {counts[key]} containers
+                  {pluralize(counts[key], 'container')}
                 </Badge>
               </div>
               <p className="mt-1 text-xs text-theme-text-tertiary">{meta.helper}</p>
@@ -504,7 +570,10 @@ function ScanSummary({
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-theme-text-tertiary">
         <span>
-          {evaluated} of {discovered} visible workloads evaluated · {result.window || '7d'} history
+          {result.coverage.workloadsEvaluated} of {result.coverage.workloadsDiscovered} workloads
+          attempted
+          {' · '}
+          {result.coverage.workloadsWithData} with usage data · {result.window} window
         </span>
         <span className="flex items-center gap-3">
           <button
@@ -512,14 +581,14 @@ function ScanSummary({
             onClick={() => onSelect('in_range')}
             className="hover:text-theme-text-primary"
           >
-            {counts.in_range} containers · no meaningful change
+            {pluralize(counts.in_range, 'container')} · no meaningful change
           </button>
           <button
             type="button"
             onClick={() => onSelect('need_data')}
             className="hover:text-theme-text-primary"
           >
-            {counts.need_data} containers · not analyzed
+            {pluralize(counts.need_data, 'container')} · needs evidence
           </button>
           {selected !== 'actions' && (
             <button
@@ -536,16 +605,14 @@ function ScanSummary({
   )
 }
 
-function ScanNotices({ result, rows }: { result: ScanResult; rows: RightsizingScanRow[] }) {
+export function ScanNotices({ result }: { result: ScanResult }) {
+  const [open, setOpen] = useState(false)
+  const disclosure = useDisclosure(open)
   const notices: string[] = []
-  if (result.state === 'partial')
-    notices.push('Some workloads could not be fully analyzed. Completed recommendations are shown.')
   if ((result.coverage.restrictedKinds?.length ?? 0) > 0)
     notices.push('Some workload kinds or namespaces were excluded by your Kubernetes access.')
   if ((result.coverage.unavailableKinds?.length ?? 0) > 0)
     notices.push('Some workload kinds could not be evaluated with the available ownership data.')
-  // Distinct from the partial notice above: these workloads were analyzed
-  // completely, the cache simply never held the other namespaces.
   if ((result.coverage.partiallyCachedKinds?.length ?? 0) > 0)
     notices.push(
       'Radar is caching only some namespaces, so this scan covered a narrower scope than the whole cluster.',
@@ -554,18 +621,60 @@ function ScanNotices({ result, rows }: { result: ScanResult; rows: RightsizingSc
   // The DaemonSet-only empty state already says this.
   if (daemonSetsWithoutNodes > 0 && result.reason !== 'only_daemonsets_without_nodes')
     notices.push(
-      `${pluralize(daemonSetsWithoutNodes, 'DaemonSet')} run on no node right now and ${daemonSetsWithoutNodes === 1 ? 'is' : 'are'} not listed. Open one from Resources to see recommendations from its retained history.`,
+      `${pluralize(daemonSetsWithoutNodes, 'DaemonSet')} ${daemonSetsWithoutNodes === 1 ? 'runs' : 'run'} on no node right now and ${daemonSetsWithoutNodes === 1 ? 'is' : 'are'} not listed. Open one from Resources to see recommendations from its retained history.`,
     )
-  for (const warning of result.warnings ?? []) notices.push(warningMessage(warning.code))
-  if (rows.length > 0 && rows.every((row) => row.classification === 'need_data'))
-    notices.push('There is not enough recent history to recommend request changes yet.')
-  return notices.length > 0 ? (
-    <div className="flex flex-col gap-2">
-      {notices.map((text) => (
-        <Notice key={text} text={text} />
-      ))}
-    </div>
-  ) : null
+  const warnings = result.warnings ?? []
+  const deadlineExceeded = warnings.some((warning) => warning.code === 'scan_deadline_exceeded')
+  for (const warning of warnings) {
+    if (warning.code !== 'scan_deadline_exceeded') notices.push(warningMessage(warning.code))
+  }
+  const partial = result.state === 'partial'
+  if (!partial && notices.length === 0 && !deadlineExceeded) return null
+  const details = [...new Set(notices)]
+  const singleNote = details.length === 1 && !deadlineExceeded
+  const hasDetails = details.length > 0 && !singleNote
+  const summary = singleNote
+    ? details[0]
+    : deadlineExceeded
+      ? 'The scan reached its time limit. Available recommendations are shown. For a narrower scan, select namespaces in the top bar and run again.'
+      : partial
+        ? 'Some workloads or metrics could not be fully evaluated. Available recommendations are shown.'
+        : 'Some workloads were excluded from this scan.'
+  return (
+    <section
+      aria-label="Scan coverage"
+      className="rounded-lg border border-theme-border bg-theme-surface text-xs text-theme-text-secondary"
+    >
+      <div className="flex items-start gap-2 px-3 py-2">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium text-theme-text-primary">
+            {partial ? 'Partial results' : 'Scan notes'}
+          </p>
+          <p className="mt-1">{summary}</p>
+        </div>
+        {hasDetails && (
+          <button
+            type="button"
+            {...disclosure.buttonProps}
+            onClick={() => setOpen(!open)}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-accent-text hover:bg-theme-hover"
+          >
+            Details <CollapseChevron open={open} className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {hasDetails && (
+        <Collapse open={open} id={disclosure.panelId}>
+          <ul className="list-disc space-y-1 border-t border-theme-border py-2 pl-9 pr-3">
+            {details.map((text) => (
+              <li key={text}>{text}</li>
+            ))}
+          </ul>
+        </Collapse>
+      )}
+    </section>
+  )
 }
 
 function Notice({ text, tone }: { text: string; tone?: 'warning' }) {
@@ -598,6 +707,7 @@ function ScanFilters(props: {
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-theme-border p-3">
+      <span className="text-xs font-medium text-theme-text-secondary">Filter results</span>
       <SearchBox
         value={props.search}
         onChange={props.onSearch}
@@ -607,12 +717,12 @@ function ScanFilters(props: {
         className="mr-auto w-60 2xl:w-72"
       />
       <SelectMenu
-        ariaLabel="Filter by namespace"
+        ariaLabel="Filter results by namespace"
         value={props.namespace}
         onChange={props.onNamespace}
-        className="w-40 2xl:w-48"
+        className="w-52"
         options={[
-          { value: '', label: 'All namespaces' },
+          { value: '', label: 'All scanned namespaces' },
           ...props.namespaces.map((value) => ({ value, label: value })),
         ]}
       />
@@ -784,7 +894,7 @@ function SignalBadge({ signal }: { signal: ResourceSignal }) {
   )
 }
 
-function FitWhy({ label, row }: { label: string; row?: RightsizingRow }) {
+export function FitWhy({ label, row }: { label: string; row?: RightsizingRow }) {
   if (!row)
     return (
       <div>
@@ -809,8 +919,9 @@ function FitWhy({ label, row }: { label: string; row?: RightsizingRow }) {
         Why this {label.toLowerCase()} guidance
       </div>
       <p className="mt-1 text-xs text-theme-text-secondary">
-        {observation}
-        {history}
+        {row.queryError
+          ? 'Metrics could not be queried, so usable history could not be determined. Retry the scan, or select fewer namespaces in the top bar.'
+          : `${observation}${history}`}
       </p>
       <EvidenceNote row={row} />
     </div>
@@ -870,7 +981,7 @@ function primaryEvidenceNote(row: RightsizingRow) {
         The calculated request would exceed the current limit.
       </p>
     )
-  if (row.fit === 'insufficient_history')
+  if (row.fit === 'insufficient_history' && !row.queryError)
     return (
       <p className="mt-1 text-xs text-theme-text-tertiary">
         Wait for more runtime history before changing this request.
@@ -984,14 +1095,15 @@ function unavailableMessage(reason?: string): string {
 }
 
 function warningMessage(code: string): string {
-  if (code === 'scan_deadline_exceeded')
-    return 'The scan reached its time limit. Results from completed batches are shown.'
   if (code === 'owner_metrics_query_failed') return 'Workload ownership data could not be queried.'
   if (code === 'oom_evidence_unavailable')
     return 'Radar could not verify restart history for some containers, so it withheld their memory reductions.'
   if (code.endsWith('_query_failed'))
-    return `Some ${code.replace('_query_failed', '').replaceAll('_', ' ')} data could not be queried.`
-  return 'Some rightsizing data was unavailable. Completed recommendations are shown.'
+    return `Some ${code
+      .replace('_query_failed', '')
+      .replaceAll('_', ' ')
+      .replace(/\bcpu\b/g, 'CPU')} data could not be queried.`
+  return 'Some rightsizing data was unavailable.'
 }
 
 function formatScanTime(value: string): string {
