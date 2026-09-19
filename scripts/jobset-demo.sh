@@ -236,10 +236,18 @@ verify_roles_running() {
   ok "${name}: one leader and two workers are Running with controller-owned role/group/index lineage"
 }
 
+dependency_status_ready() {
+  kc -n "${DEMO_NS}" get jobsets.jobset.x-k8s.io dependency-held -o json | jq -e '
+    any(.status.replicatedJobsStatus[]?; .name == "initializer" and .ready == 1 and .active == 1) and
+    any(.status.replicatedJobsStatus[]?; .name == "workers" and .ready == 0 and .active == 0)
+  ' >/dev/null
+}
+
 verify_dependency_held() {
   local name="dependency-held"
   wait_until "${name} initializer Job" count_is role_job_count 1 "${name}" initializer
   wait_until "${name} initializer Pod to be Running" count_is running_pod_count 1 "${name}"
+  wait_until "${name} ready/active role status" dependency_status_ready
   [ "$(role_job_count "${name}" workers)" = "0" ] || fail "${name} created worker Jobs before initializer completion"
   assert_job_ownership_and_labels "${name}" 1
   assert_pod_ownership_and_labels "${name}" 1
@@ -337,6 +345,67 @@ cmd_verify() {
   ok "JobSet running roles, dependency hold, terminal failure, and ownership lineage verified"
 }
 
+mcp_get_jobset() {
+  local jobset="$1" request response event
+  request="$(jq -cn \
+    --arg namespace "${DEMO_NS}" \
+    --arg jobset "${jobset}" \
+    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"get_resource",arguments:{kind:"jobsets",group:"jobset.x-k8s.io",namespace:$namespace,name:$jobset}}}')"
+  response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "${request}" \
+    "${RADAR_URL}/mcp")" || return 1
+  event="$(sed -n 's/^data: //p' <<<"${response}" | tail -n 1)"
+  [ -n "${event}" ] || { warn "MCP response contained no SSE data event" >&2; return 1; }
+  if jq -e '.error != null or .result.isError == true' <<<"${event}" >/dev/null; then
+    jq -c '{error, result}' <<<"${event}" >&2
+    return 1
+  fi
+  jq -er '.result.content[0].text | fromjson' <<<"${event}"
+}
+
+radar_execution_matches() {
+  local name="$1" phase="$2" roles="$3" jobs="$4" ready="$5" active="$6" failed="$7"
+  local expected generation rest_response mcp_response rest_execution mcp_execution
+  generation="$(kc -n "${DEMO_NS}" get jobset "${name}" -o jsonpath='{.metadata.generation}')" || \
+    { warn "Unable to read JobSet '${name}' generation" >&2; return 1; }
+  expected="$(jq -cnS --arg phase "${phase}" --argjson generation "${generation}" \
+    --argjson roles "${roles}" --argjson jobs "${jobs}" --argjson ready "${ready}" \
+    --argjson active "${active}" --argjson failed "${failed}" '
+    {controller:"jobset", subjectGeneration:$generation, phase:$phase, suspendRequested:false,
+     jobset:{declaredRoles:$roles, declaredJobs:$jobs, observedRoles:$roles,
+             jobs:{ready:$ready, active:$active, succeeded:0, failed:$failed, suspended:0},
+             restarts:{global:0, globalCountTowardsMax:0, individual:0, individualCountTowardsMax:0}}}
+    + if $phase == "finished" then
+        {outcome:"failed", nativeState:"Failed",
+         primaryCondition:{type:"Failed", status:"True", reason:"FailJobSetFailurePolicyAction"}}
+      else {} end')"
+  rest_response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+    "${RADAR_URL}/api/ai/resources/jobsets/${DEMO_NS}/${name}?group=jobset.x-k8s.io")" || \
+    { warn "REST AI resource request failed for JobSet '${name}'" >&2; return 1; }
+  mcp_response="$(mcp_get_jobset "${name}")" || { warn "MCP get_resource failed for JobSet '${name}'" >&2; return 1; }
+
+  local response
+  for response in "${rest_response}" "${mcp_response}"; do
+    jq -e --arg name "${name}" --arg namespace "${DEMO_NS}" '
+      .resource.apiVersion == "jobset.x-k8s.io/v1alpha2" and .resource.kind == "JobSet" and
+      .resource.metadata.name == $name and .resource.metadata.namespace == $namespace and
+      .resourceContext.tier == "basic"
+    ' <<<"${response}" >/dev/null || { warn "REST/MCP returned the wrong JobSet identity or context tier for '${name}'" >&2; return 1; }
+  done
+  rest_execution="$(jq -ceS '.resourceContext.execution' <<<"${rest_response}")" || \
+    { warn "REST execution context is missing for JobSet '${name}'" >&2; return 1; }
+  mcp_execution="$(jq -ceS '.resourceContext.execution' <<<"${mcp_response}")" || \
+    { warn "MCP execution context is missing for JobSet '${name}'" >&2; return 1; }
+  if [ "${rest_execution}" != "${expected}" ] || [ "${mcp_execution}" != "${expected}" ]; then
+    printf 'Expected: %s\nREST: %s\nMCP: %s\n' "${expected}" "${rest_execution}" "${mcp_execution}" >&2
+    { warn "REST/MCP execution context differs from '${name}' controller-earned state" >&2; return 1; }
+  fi
+  ok "${name}: REST and MCP agree on ${phase}, ${roles} roles, ${active} active and ${failed} failed Jobs"
+}
+
 radar_health_ready() {
   curl -fsS --connect-timeout 2 --max-time 5 "${RADAR_URL}/api/health" 2>/dev/null | \
     jq -e '.status == "healthy"' >/dev/null 2>&1
@@ -409,7 +478,10 @@ cmd_verify_radar() {
     ([.[] | select(.metadata.labels["jobset.sigs.k8s.io/jobset-name"] == "dependency-held" and .status.phase == "Running")] | length) == 1 and
     ([.[] | select(.metadata.labels["jobset.sigs.k8s.io/jobset-name"] == "terminal-failure" and .status.phase == "Failed")] | length) == 1
   ' <<<"${pods}" >/dev/null || fail "Radar did not expose the expected controller-created Pods"
-  ok "Radar returned the real JobSet states and Job/Pod lineage through group-aware resource APIs"
+  wait_until "Radar execution projection" radar_execution_matches roles-running active 2 3 3 3 0
+  wait_until "Radar execution projection" radar_execution_matches dependency-held active 2 3 1 1 0
+  wait_until "Radar execution projection" radar_execution_matches terminal-failure finished 1 1 0 0 1
+  ok "Radar returned real JobSet lineage and exact matching REST/MCP execution context"
 }
 
 cmd_up() {

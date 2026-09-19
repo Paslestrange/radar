@@ -42,6 +42,7 @@ type ResourceContext struct {
 	ScaledBy        []ScalerRef        `json:"scaledBy,omitempty"`
 	StatusSummary   *StatusSummary     `json:"statusSummary,omitempty"`
 	Scheduling      *SchedulingSummary `json:"scheduling,omitempty"`
+	Execution       *ExecutionSummary  `json:"execution,omitempty"`
 	PodSummary      *PodSummary        `json:"podSummary,omitempty"`
 	WorkloadSummary *WorkloadSummary   `json:"workloadSummary,omitempty"`
 	ServiceSummary  *ServiceSummary    `json:"serviceSummary,omitempty"`
@@ -409,6 +410,81 @@ type KueueRequeueState struct {
 type KueueConcurrentAdmission struct {
 	ParentName string      `json:"parentName"`
 	ParentRef  *ContextRef `json:"parentRef,omitempty"`
+}
+
+// ExecutionSummary describes the root's last reported execution, not Pod
+// readiness or object deletion. Exactly one detail block matches Controller;
+// quantities stay there because controllers count different units and populations.
+// SubjectGeneration survives AI minification. PrimaryCondition.ObservedGeneration
+// applies only to that condition, not to counters or the whole snapshot.
+// SuspendRequested is intent: nil means unavailable, false means not requested.
+type ExecutionSummary struct {
+	Controller        ExecutionController `json:"controller"`
+	SubjectGeneration int64               `json:"subjectGeneration,omitempty"`
+	Phase             ExecutionPhase      `json:"phase"`
+	Outcome           ExecutionOutcome    `json:"outcome,omitempty"`
+	PrimaryCondition  *ConditionSummary   `json:"primaryCondition,omitempty"`
+	NativeState       string              `json:"nativeState,omitempty"`
+	SuspendRequested  *bool               `json:"suspendRequested,omitempty"`
+	JobSet            *JobSetExecution    `json:"jobset,omitempty"`
+}
+
+type ExecutionController string
+
+const ExecutionControllerJobSet ExecutionController = "jobset"
+
+// Pending requires observed inactivity; absent evidence is Unknown. Active
+// includes startup, retries and cleanup, not proof that user code is running.
+// Suspended requires controller evidence, not just requested intent. Finished
+// requires a root outcome; all other phases omit it. Child failures are not root outcomes.
+type ExecutionPhase string
+
+const (
+	ExecutionPending   ExecutionPhase = "pending"
+	ExecutionActive    ExecutionPhase = "active"
+	ExecutionSuspended ExecutionPhase = "suspended"
+	ExecutionFinished  ExecutionPhase = "finished"
+	ExecutionUnknown   ExecutionPhase = "unknown"
+)
+
+// ExecutionOutcome is extensible. Consumers must retain unfamiliar values as
+// unclassified outcomes rather than coerce them to success or failure.
+type ExecutionOutcome string
+
+const (
+	ExecutionSucceeded ExecutionOutcome = "succeeded"
+	ExecutionFailed    ExecutionOutcome = "failed"
+)
+
+// JobSetExecution keeps declarations separate from reported child-Job counts.
+// ObservedRoles counts reported entries, not identity completeness or freshness.
+// Nil observed groups mean unavailable; present zero values mean observed zero.
+type JobSetExecution struct {
+	DeclaredRoles int64                `json:"declaredRoles"`
+	DeclaredJobs  int64                `json:"declaredJobs"`
+	ObservedRoles *int64               `json:"observedRoles,omitempty"`
+	Jobs          *ChildJobCounts      `json:"jobs,omitempty"`
+	Restarts      *JobSetRestartCounts `json:"restarts,omitempty"`
+}
+
+// ChildJobCounts uses the child-Job semantics shared by JobSet and TrainJob.
+// Ready can include completed Pods, active can include Pending Pods, and the
+// counters overlap. A nil block distinguishes unreported status from zero.
+type ChildJobCounts struct {
+	Ready     int64 `json:"ready"`
+	Active    int64 `json:"active"`
+	Succeeded int64 `json:"succeeded"`
+	Failed    int64 `json:"failed"`
+	Suspended int64 `json:"suspended"`
+}
+
+// JobSetRestartCounts separates global and individual Job recreation and the
+// counts charged to the restart limit. These are not in-place/container retries.
+type JobSetRestartCounts struct {
+	Global                    *int64 `json:"global,omitempty"`
+	GlobalCountTowardsMax     *int64 `json:"globalCountTowardsMax,omitempty"`
+	Individual                *int64 `json:"individual,omitempty"`
+	IndividualCountTowardsMax *int64 `json:"individualCountTowardsMax,omitempty"`
 }
 
 type PodSummary struct {

@@ -66,7 +66,11 @@ installing or applying anything.
 - the controller-created Jobs and Pods returned by Radar's core resource APIs;
 - matching Kubernetes and Radar resource inventories, including exact UIDs,
   owner references, labels, and lifecycle evidence, with bounded waits for cache
-  synchronization.
+  synchronization;
+- exact basic-tier execution summaries through REST AI detail and MCP
+  `get_resource`, including full GVK, namespace/name, subject generation, phase/outcome, native state,
+  condition/reason, requested suspension, and JobSet-specific counts/recreation
+  counters with explicit observed zeros.
 
 Every namespaced API request explicitly selects `jobset-demo`, independently of
 Radar's saved namespace view filter.
@@ -79,16 +83,28 @@ kubectl config use-context kind-radar-jobset-demo
 ./scripts/visual-test-start.sh
 ```
 
+The execution assertions expect `active` for both the three-member run and
+the initializer: a withheld dependent role does not make the whole run suspended
+or failed. The terminal scenario expects `finished` / `failed` with the exact
+controller failure-policy reason. All three retain explicit observed zero Job
+counts and zero recreation totals. Omitted per-Job restart arrays mean zero for
+reported roles; missing role status means unavailable individual totals.
+The shared phase does not claim Pod readiness; the fixture separately verifies
+ready and active counts. Schema invariants are documented alongside the
+[types](../../pkg/resourcecontext/types.go) and
+[JobSet adapter](../../pkg/executioninsight/jobset.go).
+
 ## Proof boundary
 
 Passing this lane proves that JobSet `v0.12.0` on kind Kubernetes `v1.36.1`
 can create and identify role-, group-, and index-labelled Jobs and Pods,
 withhold a dependent role, produce one explicit terminal failure, and expose
-those objects through Radar's group-aware APIs.
+those objects through Radar's group-aware APIs with the expected basic-tier
+execution summary wired through both REST and MCP.
 
 It does **not** prove:
 
-- normalized execution context, MCP projections, or UI rendering/drilldown;
+- diagnostic-tier execution context or UI rendering/drilldown;
 - GPU hardware, device plugins, DRA allocation, utilization, or cost;
 - Kueue admission, quota, preemption, or topology-aware scheduling;
 - framework-specific semantics for Ray, Kubeflow Training, MPI, PyTorch, or inference;

@@ -1552,6 +1552,15 @@ coverage, or support for other Kueue API versions.
 | MPIJob | `kubeflow.org` (v1, v2beta1) | JobCondition pattern |
 | TrainJob | `trainer.kubeflow.org/v1alpha1` | Complete / Failed / Suspended conditions + active child jobs |
 
+For `jobset.x-k8s.io/v1alpha2` JobSets, REST AI detail and MCP `get_resource`
+include `resourceContext.execution`: root lifecycle and outcome, controller evidence,
+requested suspension, and JobSet-specific role, child-Job, and recreation counts.
+Missing observations remain distinct from zero. Activity does not guarantee running
+Pods, and a suspension request does not prove observed suspension or its cause.
+Root outcomes require root evidence; child failures alone are not terminal.
+Native spec/status remain available. This does not add JobSet `diagnose`, infer
+admission causes, or replace the JobSet→Job→Pod ownership chain.
+
 Volcano Job, the Volcano/KAI Queues and PodGroups, and KAITO Workspaces share kind names with other resources — Radar disambiguates by API group in tables, filters, and status badges.
 
 ### Model serving operators: KAITO, NVIDIA NIM, AMD
