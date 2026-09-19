@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,8 @@ type fakeScanQuerier struct {
 	mu           sync.Mutex
 	queries      []string
 	rangeQueries []string
+	rangeStarts  []time.Time
+	rangeEnds    []time.Time
 	queryFn      func(string) (*prom.QueryResult, error)
 	rangeFn      func(string) (*prom.QueryResult, error)
 }
@@ -40,9 +43,11 @@ func (f *fakeScanQuerier) Query(_ context.Context, query string) (*prom.QueryRes
 	return &prom.QueryResult{}, nil
 }
 
-func (f *fakeScanQuerier) QueryRange(_ context.Context, query string, _, _ time.Time, _ time.Duration) (*prom.QueryResult, error) {
+func (f *fakeScanQuerier) QueryRange(_ context.Context, query string, start, end time.Time, _ time.Duration) (*prom.QueryResult, error) {
 	f.mu.Lock()
 	f.rangeQueries = append(f.rangeQueries, query)
+	f.rangeStarts = append(f.rangeStarts, start)
+	f.rangeEnds = append(f.rangeEnds, end)
 	f.mu.Unlock()
 	if f.rangeFn != nil {
 		return f.rangeFn(query)
@@ -252,6 +257,40 @@ func TestRightsizingScanReportsMissingKSMAndPartialEvidence(t *testing.T) {
 	}
 }
 
+func TestRightsizingScanNamesADeadlineThatCutTheOnlyBatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &fakeScanQuerier{
+		queryFn: func(query string) (*prom.QueryResult, error) {
+			if query == "count(kube_pod_owner)" || query == "count(kube_replicaset_owner)" {
+				return ksmAvailable(), nil
+			}
+			return &prom.QueryResult{}, nil
+		},
+		rangeFn: func(string) (*prom.QueryResult, error) {
+			cancel()
+			return nil, context.Canceled
+		},
+	}
+	workloads := []scanWorkload{scanTestWorkload("StatefulSet", "prod", "db", "db")}
+	resp := computeRightsizingScan(ctx, client, workloads, newRightsizingScanResponse(time.Now(), RightsizingScanScope{}))
+	if resp.Coverage.Batches != 1 || resp.Coverage.CompletedBatches != 0 {
+		t.Fatalf("coverage = %+v, want one incomplete batch", resp.Coverage)
+	}
+	if !hasScanWarning(resp.Warnings, "scan_deadline_exceeded") {
+		t.Fatalf("warnings = %+v, want scan_deadline_exceeded for a batch the deadline cut", resp.Warnings)
+	}
+}
+
+func hasScanWarning(warnings []RightsizingScanWarning, code string) bool {
+	for _, warning := range warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRightsizingScanKeepsNonDeploymentsWhenReplicaSetOwnersMissing(t *testing.T) {
 	workloads := []scanWorkload{
 		scanTestWorkload("Deployment", "prod", "api", "app"),
@@ -284,6 +323,34 @@ func TestRightsizingScanReportsMissingReplicaSetOwnersForDeploymentOnlyScope(t *
 	}, newRightsizingScanResponse(time.Now(), RightsizingScanScope{}))
 	if resp.State != RightsizingScanUnavailable || resp.Reason != "deployment_owner_metrics_missing" {
 		t.Fatalf("deployment-only missing owner response = %+v", resp)
+	}
+}
+
+func TestRightsizingScanReportsFailedReplicaSetOwnerQueryAsFailure(t *testing.T) {
+	client := &fakeScanQuerier{queryFn: func(query string) (*prom.QueryResult, error) {
+		if query == "count(kube_pod_owner)" {
+			return ksmAvailable(), nil
+		}
+		return nil, errors.New("prometheus timeout")
+	}}
+	resp := computeRightsizingScan(context.Background(), client, []scanWorkload{
+		scanTestWorkload("Deployment", "prod", "api", "app"),
+	}, newRightsizingScanResponse(time.Now(), RightsizingScanScope{}))
+	if resp.State != RightsizingScanUnavailable || resp.Reason != "deployment_owner_metrics_query_failed" {
+		t.Fatalf("a failed query is not missing metrics: %+v", resp)
+	}
+}
+
+func TestRightsizingScanKindReadableSomewhereIsNotUnreadable(t *testing.T) {
+	// Every kind is readable in "dev" but not in "monitoring": the scope is
+	// narrowed, and an empty "dev" is not every kind being unreadable.
+	resp := newRightsizingScanResponse(time.Now(), RightsizingScanScope{
+		NamespacesByKind: map[string][]string{"Deployment": {"dev"}, "StatefulSet": {"dev"}, "DaemonSet": {"dev"}},
+		RestrictedKinds:  []string{"Deployment", "StatefulSet", "DaemonSet"},
+	})
+	resp = computeRightsizingScan(context.Background(), &fakeScanQuerier{}, nil, resp)
+	if resp.State != RightsizingScanPartial || resp.Reason != "limited_scope_no_workloads" {
+		t.Fatalf("narrowed empty scope = %+v", resp)
 	}
 }
 
@@ -614,5 +681,241 @@ func TestEnrichScanHPAHonoursCoverageEndToEnd(t *testing.T) {
 				t.Error("the HPA targets this Deployment's CPU; that must survive the coverage check")
 			}
 		})
+	}
+}
+
+type fakeScanCoverage struct {
+	clusterWide map[string]bool
+	namespaces  map[string][]string
+}
+
+func (f fakeScanCoverage) IsKindClusterWide(resource string) bool { return f.clusterWide[resource] }
+func (f fakeScanCoverage) KindNamespaces(resource string) []string {
+	return f.namespaces[resource]
+}
+func TestScopeClampNarrowsAllNamespacesToWhatTheCacheHolds(t *testing.T) {
+	// A nil namespace list means "every namespace" to the listers, but a
+	// namespace-scoped informer only ever held a subset — without the clamp a
+	// one-namespace cache is reported as a completed cluster scan.
+	cache := fakeScanCoverage{
+		clusterWide: map[string]bool{"daemonsets": true},
+		namespaces:  map[string][]string{"deployments": {"prod"}},
+	}
+
+	effective, partial := clampScopeToCacheCoverage(cache, map[string][]string{
+		"Deployment": nil,
+		"DaemonSet":  nil,
+	})
+
+	if got := effective["Deployment"]; !slices.Equal(got, []string{"prod"}) {
+		t.Errorf("Deployment scope = %v, want the cached namespaces", got)
+	}
+	if got := effective["DaemonSet"]; got != nil {
+		t.Errorf("a cluster-wide kind must stay unclamped, got %v", got)
+	}
+	if !slices.Equal(partial, []string{"Deployment"}) {
+		t.Errorf("partially cached kinds = %v, want [Deployment]", partial)
+	}
+}
+func TestScopeClampIntersectsAnExplicitRequest(t *testing.T) {
+	cache := fakeScanCoverage{namespaces: map[string][]string{"deployments": {"prod"}}}
+
+	effective, partial := clampScopeToCacheCoverage(cache, map[string][]string{
+		"Deployment": {"prod", "staging"},
+	})
+
+	if got := effective["Deployment"]; !slices.Equal(got, []string{"prod"}) {
+		t.Errorf("Deployment scope = %v, want only the cached namespace", got)
+	}
+	if !slices.Equal(partial, []string{"Deployment"}) {
+		t.Errorf("dropping a requested namespace must report partial, got %v", partial)
+	}
+}
+func TestScopeClampLeavesFullyCoveredRequestsAlone(t *testing.T) {
+	cache := fakeScanCoverage{namespaces: map[string][]string{"deployments": {"prod", "staging"}}}
+
+	effective, partial := clampScopeToCacheCoverage(cache, map[string][]string{
+		"Deployment": {"prod"},
+	})
+
+	if got := effective["Deployment"]; !slices.Equal(got, []string{"prod"}) {
+		t.Errorf("Deployment scope = %v, want it untouched", got)
+	}
+	if len(partial) != 0 {
+		t.Errorf("a fully covered request is not partial, got %v", partial)
+	}
+}
+func TestOverlappingCoverageListsDoNotFakeAllKindsUnavailable(t *testing.T) {
+	// A kind readable in only some requested namespaces lands in RestrictedKinds
+	// and, if its informer covers fewer still, in PartiallyCachedKinds too.
+	// Summing the lists reaches 3 with DaemonSet still fully readable, which
+	// would claim every workload kind is unreadable.
+	resp := newRightsizingScanResponse(time.Now(), RightsizingScanScope{
+		RestrictedKinds: []string{"Deployment", "StatefulSet"},
+	})
+	resp.Coverage.PartiallyCachedKinds = []string{"Deployment"}
+
+	resp = computeRightsizingScan(context.Background(), &fakeScanQuerier{}, nil, resp)
+	if resp.State != RightsizingScanPartial || resp.Reason != "limited_scope_no_workloads" {
+		t.Fatalf("two limited kinds must stay partial, got %+v", resp)
+	}
+}
+func TestPartiallyCachedKindMakesAnEmptyScanPartialNotComplete(t *testing.T) {
+	// A namespace-scoped informer that happens to hold no workloads must not
+	// report "no_workloads" as a completed cluster scan.
+	resp := newRightsizingScanResponse(time.Now(), RightsizingScanScope{})
+	resp.Coverage.PartiallyCachedKinds = []string{"Deployment"}
+
+	resp = computeRightsizingScan(context.Background(), &fakeScanQuerier{}, nil, resp)
+	if resp.State != RightsizingScanPartial || resp.Reason != "limited_scope_no_workloads" {
+		t.Fatalf("partially cached empty response = %+v", resp)
+	}
+}
+
+func TestAllKindsPartiallyCachedIsPartialNotUnavailable(t *testing.T) {
+	// A namespace-scoped Radar falls back to namespace informers for all three
+	// kinds. If the covered namespaces hold no Deployment, StatefulSet or
+	// DaemonSet, every kind is partially cached and no workload is found — but
+	// all three are readable, so the answer is "nothing here in this scope",
+	// not "none of these kinds can be read".
+	resp := newRightsizingScanResponse(time.Now(), RightsizingScanScope{})
+	resp.Coverage.PartiallyCachedKinds = []string{"Deployment", "StatefulSet", "DaemonSet"}
+
+	resp = computeRightsizingScan(context.Background(), &fakeScanQuerier{}, nil, resp)
+	if resp.State == RightsizingScanUnavailable {
+		t.Fatalf("partial caching is not unreadability: %+v", resp)
+	}
+	if resp.Reason == "workload_kinds_unavailable" {
+		t.Errorf("readable-but-narrowed kinds reported as unavailable: %+v", resp)
+	}
+	if resp.State != RightsizingScanPartial || resp.Reason != "limited_scope_no_workloads" {
+		t.Errorf("expected partial/limited_scope_no_workloads, got %+v", resp)
+	}
+}
+
+func TestAllKindsUnreadableStaysUnavailable(t *testing.T) {
+	// The other side of the same threshold: when every kind really is denied or
+	// has no metrics, the scan must still say so rather than report an empty
+	// cluster.
+	resp := newRightsizingScanResponse(time.Now(), RightsizingScanScope{
+		RestrictedKinds: []string{"Deployment", "StatefulSet"},
+	})
+	resp.Coverage.UnavailableKinds = []string{"DaemonSet"}
+
+	resp = computeRightsizingScan(context.Background(), &fakeScanQuerier{}, nil, resp)
+	if resp.State != RightsizingScanUnavailable || resp.Reason != "workload_kinds_unavailable" {
+		t.Fatalf("expected unavailable/workload_kinds_unavailable, got %+v", resp)
+	}
+}
+
+func TestScanWarningsDoNotCarryWholeQueryURLs(t *testing.T) {
+	// prom.HTTPTransport errors embed the full query_range URL. Forwarded
+	// verbatim these ran to tens of kilobytes and crowded out the rows they
+	// annotate; consumers key on Code, so the detail can be bounded.
+	longQuery := strings.Repeat("sum(rate(container_cpu_usage_seconds_total[5m]))+", 400)
+	raw := `Get "http://prom:9090/api/v1/query_range?query=` + longQuery + `&start=1&end=2": dial tcp: i/o timeout`
+
+	var resp RightsizingScanResponse
+	appendScanWarning(&resp, "owner_metrics_query_failed", raw)
+
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("expected one warning, got %d", len(resp.Warnings))
+	}
+	got := resp.Warnings[0].Message
+	if len(got) > maxWarningMessageBytes+len("… (truncated)") {
+		t.Errorf("warning message not bounded: %d bytes", len(got))
+	}
+	if strings.Contains(got, longQuery) {
+		t.Error("the PromQL expression must not be forwarded verbatim")
+	}
+	if !strings.Contains(got, "query_range") {
+		t.Errorf("the bounded message should still identify the failing call: %q", got)
+	}
+}
+
+// Warnings reach MCP clients, which must never see the backend address or
+// credentials a --prometheus-url carries in its userinfo.
+func TestScanWarningsDoNotCarryTheBackendAddress(t *testing.T) {
+	for _, raw := range []string{
+		`upstream returned 503 for https://admin:s3cret@prom.internal:9090/api/v1/query_range?query=up&start=1: overloaded`,
+		`prom: query error from https://admin:s3cret@prom.internal:9090: bad_data (execution)`,
+		`Get "http://prom.internal:9090/api/v1/query": dial tcp: i/o timeout`,
+	} {
+		got := boundWarningMessage(raw)
+		for _, leaked := range []string{"admin", "s3cret", "prom.internal", "9090"} {
+			if strings.Contains(got, leaked) {
+				t.Errorf("warning leaked %q: %q", leaked, got)
+			}
+		}
+	}
+	got := boundWarningMessage(`upstream returned 503 for https://admin:s3cret@prom.internal:9090/api/v1/query_range?query=up: overloaded`)
+	if !strings.Contains(got, "/api/v1/query_range") || !strings.Contains(got, "503") || !strings.Contains(got, "overloaded") {
+		t.Errorf("the redacted message should still identify the failing call and its cause: %q", got)
+	}
+}
+
+func TestBoundWarningMessageLeavesShortMessagesAlone(t *testing.T) {
+	const short = "kube_pod_owner returned no series"
+	if got := boundWarningMessage(short); got != short {
+		t.Errorf("a short diagnostic must survive intact, got %q", got)
+	}
+}
+
+// Prometheus aligns subquery evaluation to the epoch, so the per-workload path
+// (quantile_over_time(0.95, X[7d:5m])) always samples the same instants. A range
+// query walks outward from its own start instead, so an unaligned start samples
+// different instants than the per-workload path just used — and for a gauge it
+// can straddle or skip a peak entirely. The two surfaces then disagree about the
+// same container, and the Rightsizing screen, which calls the scan, inherits it.
+func TestScanRangeWindowIsAlignedToTheSubqueryGrid(t *testing.T) {
+	stepSeconds := int64(rightsizingStep / time.Second)
+
+	for _, offset := range []time.Duration{0, 1 * time.Second, 137 * time.Second, 299 * time.Second} {
+		fake := &fakeScanQuerier{}
+		now := time.Unix(1789513500, 0).UTC().Add(offset)
+		queryRightsizingScanBatch(context.Background(), fake,
+			[]scanWorkload{scanTestWorkload("Deployment", "shop", "checkout", "api")}, now)
+
+		if len(fake.rangeStarts) == 0 {
+			t.Fatalf("offset %v: no range queries issued", offset)
+		}
+		for i, start := range fake.rangeStarts {
+			end := fake.rangeEnds[i]
+			if start.Unix()%stepSeconds != 0 {
+				t.Errorf("offset %v: range start %d is not a multiple of the %ds step; the scan samples a different grid than scope=workload",
+					offset, start.Unix(), stepSeconds)
+			}
+			if end.Unix()%stepSeconds != 0 {
+				t.Errorf("offset %v: range end %d is not a multiple of the %ds step", offset, end.Unix(), stepSeconds)
+			}
+			if got := end.Sub(start); got != rightsizingWindow {
+				t.Errorf("offset %v: window = %v, want %v", offset, got, rightsizingWindow)
+			}
+			// Alignment must round DOWN: a grid ending after the scan started
+			// would query the future and return a short series.
+			if end.After(now) {
+				t.Errorf("offset %v: range end %v is after the scan time %v", offset, end, now)
+			}
+		}
+	}
+}
+
+// Two scans a few seconds apart must read the same instants. Before alignment
+// they walked two different grids, and the same container reported a different
+// P95 depending on when the scan happened to run.
+func TestScansSecondsApartQueryTheSameWindow(t *testing.T) {
+	base := time.Unix(1789513500, 0).UTC()
+	var windows [][2]time.Time
+	for _, offset := range []time.Duration{3 * time.Second, 91 * time.Second, 288 * time.Second} {
+		fake := &fakeScanQuerier{}
+		queryRightsizingScanBatch(context.Background(), fake,
+			[]scanWorkload{scanTestWorkload("Deployment", "shop", "checkout", "api")}, base.Add(offset))
+		windows = append(windows, [2]time.Time{fake.rangeStarts[0], fake.rangeEnds[0]})
+	}
+	for i := 1; i < len(windows); i++ {
+		if !windows[i][0].Equal(windows[0][0]) || !windows[i][1].Equal(windows[0][1]) {
+			t.Errorf("scan %d queried %v–%v, scan 0 queried %v–%v; scans inside one step must sample identical instants",
+				i, windows[i][0], windows[i][1], windows[0][0], windows[0][1])
+		}
 	}
 }

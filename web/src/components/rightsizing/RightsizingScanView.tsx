@@ -8,6 +8,7 @@ import {
   PageHeader,
   SearchBox,
   SelectMenu,
+  pluralize,
 } from '@skyhook-io/k8s-ui'
 import { Badge } from '@skyhook-io/k8s-ui/components/ui/Badge'
 import {
@@ -335,7 +336,13 @@ export function RightsizingScanView({ namespaces }: RightsizingScanViewProps) {
               onSelect={(value) => setFilter('rfClass', value === 'actions' ? undefined : value)}
             />
             <ScanNotices result={result} rows={rows} />
-            {result.coverage.workloadsDiscovered === 0 || rows.length === 0 ? (
+            {result.reason === 'only_daemonsets_without_nodes' ? (
+              <EmptyState
+                variant="card"
+                headline="Only DaemonSets with no nodes in this scope"
+                body="Every workload here is a DaemonSet that runs on no node right now, so none was scanned. Open one from Resources to see recommendations from its retained history."
+              />
+            ) : result.coverage.workloadsDiscovered === 0 || rows.length === 0 ? (
               <EmptyState
                 variant="card"
                 headline="No supported workloads in this scope"
@@ -537,6 +544,18 @@ function ScanNotices({ result, rows }: { result: ScanResult; rows: RightsizingSc
     notices.push('Some workload kinds or namespaces were excluded by your Kubernetes access.')
   if ((result.coverage.unavailableKinds?.length ?? 0) > 0)
     notices.push('Some workload kinds could not be evaluated with the available ownership data.')
+  // Distinct from the partial notice above: these workloads were analyzed
+  // completely, the cache simply never held the other namespaces.
+  if ((result.coverage.partiallyCachedKinds?.length ?? 0) > 0)
+    notices.push(
+      'Radar is caching only some namespaces, so this scan covered a narrower scope than the whole cluster.',
+    )
+  const daemonSetsWithoutNodes = result.coverage.daemonSetsWithoutNodes ?? 0
+  // The DaemonSet-only empty state already says this.
+  if (daemonSetsWithoutNodes > 0 && result.reason !== 'only_daemonsets_without_nodes')
+    notices.push(
+      `${pluralize(daemonSetsWithoutNodes, 'DaemonSet')} run on no node right now and ${daemonSetsWithoutNodes === 1 ? 'is' : 'are'} not listed. Open one from Resources to see recommendations from its retained history.`,
+    )
   for (const warning of result.warnings ?? []) notices.push(warningMessage(warning.code))
   if (rows.length > 0 && rows.every((row) => row.classification === 'need_data'))
     notices.push('There is not enough recent history to recommend request changes yet.')

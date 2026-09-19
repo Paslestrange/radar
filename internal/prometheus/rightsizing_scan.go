@@ -29,9 +29,91 @@ const (
 	rightsizingScanBatchSize                        = 50
 )
 
+// RightsizingScanKind pairs a workload kind with the API resource its informer
+// and SubjectAccessReviews use.
+type RightsizingScanKind struct {
+	Kind     string
+	Resource string
+}
+
+// RightsizingScanKinds is the canonical set of kinds a scan walks. Both the
+// REST handler and the MCP tool build their scope from this one list: a kind
+// present on one surface and missing on the other is silently absent from
+// results rather than reported as restricted.
+var RightsizingScanKinds = []RightsizingScanKind{
+	{Kind: "Deployment", Resource: "deployments"},
+	{Kind: "StatefulSet", Resource: "statefulsets"},
+	{Kind: "DaemonSet", Resource: "daemonsets"},
+}
+
+// ScanKindResource maps a workload kind to the API resource its informer and
+// SubjectAccessReviews use. Authorization sites go through this rather than
+// pluralizing the kind, so a resource whose plural is not kind+"s" cannot
+// silently authorize against a resource that does not exist.
+func ScanKindResource(kind string) string {
+	for _, k := range RightsizingScanKinds {
+		if strings.EqualFold(k.Kind, kind) {
+			return k.Resource
+		}
+	}
+	return ""
+}
+
+// ScanAuthorizer answers what the caller's identity may list. The REST handler
+// and the MCP tool differ only in how they run a SubjectAccessReview, so the
+// scope policy itself — which kinds are restricted, and how a partial namespace
+// answer is recorded — lives here rather than being written once per surface.
+type ScanAuthorizer interface {
+	// CanListAllNamespaces reports cluster-wide list access for a resource.
+	CanListAllNamespaces(resource string) bool
+	// FilterNamespaces returns the subset of namespaces the identity can list.
+	FilterNamespaces(resource string, namespaces []string) []string
+}
+
+// ResolveScanScope builds the scan scope for an identity. A nil namespaces
+// means "every namespace"; a non-nil one is the already-resolved request. A
+// kind readable in only some of the requested namespaces is recorded as
+// restricted, so the scan reports a narrowed answer as partial rather than
+// as a complete one over fewer workloads.
+func ResolveScanScope(namespaces []string, authz ScanAuthorizer) RightsizingScanScope {
+	scope := RightsizingScanScope{
+		NamespacesByKind: make(map[string][]string, len(RightsizingScanKinds)),
+	}
+	for _, workloadKind := range RightsizingScanKinds {
+		if namespaces == nil {
+			if authz.CanListAllNamespaces(workloadKind.Resource) {
+				scope.NamespacesByKind[workloadKind.Kind] = nil
+			} else {
+				scope.RestrictedKinds = append(scope.RestrictedKinds, workloadKind.Kind)
+			}
+			continue
+		}
+		allowed := authz.FilterNamespaces(workloadKind.Resource, namespaces)
+		if len(allowed) > 0 {
+			scope.NamespacesByKind[workloadKind.Kind] = allowed
+		}
+		if len(allowed) < len(namespaces) {
+			scope.RestrictedKinds = append(scope.RestrictedKinds, workloadKind.Kind)
+		}
+	}
+	return scope
+}
+
 type RightsizingScanScope struct {
 	NamespacesByKind map[string][]string
 	RestrictedKinds  []string
+}
+
+// deniedKinds are the restricted kinds readable in no requested namespace. A
+// kind readable in some of them is narrowed, not unreadable.
+func (s RightsizingScanScope) deniedKinds() []string {
+	var denied []string
+	for _, kind := range s.RestrictedKinds {
+		if _, readable := s.NamespacesByKind[kind]; !readable {
+			denied = append(denied, kind)
+		}
+	}
+	return denied
 }
 
 type RightsizingScanWarning struct {
@@ -47,6 +129,28 @@ type RightsizingScanCoverage struct {
 	CompletedBatches    int      `json:"completedBatches"`
 	RestrictedKinds     []string `json:"restrictedKinds,omitempty"`
 	UnavailableKinds    []string `json:"unavailableKinds,omitempty"`
+
+	// PartiallyCachedKinds are kinds whose informer covers only some
+	// namespaces, so a scope asking for "all namespaces" silently reads a
+	// subset. Without this a namespace-scoped Radar reports a cluster scan of
+	// one namespace as complete.
+	PartiallyCachedKinds []string `json:"partiallyCachedKinds,omitempty"`
+
+	// DaemonSetsWithoutNodes counts DaemonSets left out because their node
+	// selector matches no node: no pods, nothing to size, and on managed
+	// clusters dozens of them would otherwise fill the ranked list.
+	DaemonSetsWithoutNodes int `json:"daemonSetsWithoutNodes,omitempty"`
+	// SkippedDaemonSets names them as namespace/name, sorted, so a caller can
+	// read one's retained history directly.
+	SkippedDaemonSets []string `json:"-"`
+
+	// ScannedNamespacesByKind is the requested scope narrowed to what the
+	// informer cache holds, once the scan reaches the cache. A caller naming
+	// the namespaces that were scanned must read them here rather than from
+	// its own request, which the cache can be narrower than.
+	ScannedNamespacesByKind map[string][]string `json:"-"`
+
+	deniedKinds []string
 }
 
 type RightsizingScanWorkload struct {
@@ -55,6 +159,7 @@ type RightsizingScanWorkload struct {
 	Name         string           `json:"name"`
 	Replicas     int              `json:"replicas"`
 	ScaledToZero bool             `json:"scaledToZero"`
+	ManagedBy    *WorkloadManager `json:"managedBy,omitempty"`
 	Rows         []RightsizingRow `json:"rows"`
 }
 
@@ -111,9 +216,74 @@ func ScanRightsizing(ctx context.Context, scope RightsizingScanScope) Rightsizin
 		resp.Reason = "resource_cache_unavailable"
 		return resp
 	}
-	workloads, unavailable := snapshotScanWorkloads(ctx, cache, scope.NamespacesByKind)
+	effective, partiallyCached := clampScopeToCacheCoverage(cache, scope.NamespacesByKind)
+	resp.Coverage.PartiallyCachedKinds = partiallyCached
+	resp.Coverage.ScannedNamespacesByKind = effective
+	workloads, unavailable, skippedDaemonSets := snapshotScanWorkloads(ctx, cache, effective)
 	resp.Coverage.UnavailableKinds = unavailable
+	resp.Coverage.DaemonSetsWithoutNodes = len(skippedDaemonSets)
+	sort.Strings(skippedDaemonSets)
+	resp.Coverage.SkippedDaemonSets = skippedDaemonSets
 	return computeRightsizingScan(ctx, client, workloads, resp)
+}
+
+// scanCacheCoverage is the slice of the resource cache the scope clamp needs.
+// Narrowed to an interface so the clamp is testable without standing up a real
+// informer cache.
+type scanCacheCoverage interface {
+	IsKindClusterWide(resource string) bool
+	KindNamespaces(resource string) []string
+}
+
+// clampScopeToCacheCoverage narrows a requested scope to what the informers
+// actually hold. A nil namespace list means "every namespace" to the listers,
+// but a per-kind namespace-scoped informer only ever held a subset — reading it
+// as authoritative turns a one-namespace cache into a reported cluster scan.
+// Kinds narrowed this way are returned so the caller can mark the scan partial.
+func clampScopeToCacheCoverage(cache scanCacheCoverage, scopes map[string][]string) (map[string][]string, []string) {
+	if len(scopes) == 0 {
+		return scopes, nil
+	}
+	effective := make(map[string][]string, len(scopes))
+	var partial []string
+	for kind, namespaces := range scopes {
+		resource := ScanKindResource(kind)
+		effective[kind] = namespaces
+		if resource == "" || cache.IsKindClusterWide(resource) {
+			continue
+		}
+		covered := cache.KindNamespaces(resource)
+		if len(covered) == 0 {
+			// Disabled informer: snapshotScanWorkloads reports it as
+			// unavailable via its nil lister, which is the stronger signal.
+			continue
+		}
+		if namespaces == nil {
+			effective[kind] = covered
+			partial = appendUniqueSorted(partial, kind)
+			continue
+		}
+		narrowed := intersectNamespaces(namespaces, covered)
+		effective[kind] = narrowed
+		if len(narrowed) < len(namespaces) {
+			partial = appendUniqueSorted(partial, kind)
+		}
+	}
+	return effective, partial
+}
+
+func intersectNamespaces(requested, covered []string) []string {
+	set := make(map[string]struct{}, len(covered))
+	for _, ns := range covered {
+		set[ns] = struct{}{}
+	}
+	out := make([]string, 0, len(requested))
+	for _, ns := range requested {
+		if _, ok := set[ns]; ok {
+			out = append(out, ns)
+		}
+	}
+	return out
 }
 
 func newRightsizingScanResponse(now time.Time, scope RightsizingScanScope) RightsizingScanResponse {
@@ -121,7 +291,12 @@ func newRightsizingScanResponse(now time.Time, scope RightsizingScanScope) Right
 	sort.Strings(restricted)
 	return RightsizingScanResponse{
 		State: RightsizingScanUnavailable, ScannedAt: now, Window: "7d", Source: "radar",
-		Coverage:  RightsizingScanCoverage{RestrictedKinds: restricted},
+		Coverage: RightsizingScanCoverage{
+			RestrictedKinds: restricted, deniedKinds: scope.deniedKinds(),
+			// Seeded with the request so the early returns below — no client,
+			// no cache — report the scope as unnarrowed rather than as empty.
+			ScannedNamespacesByKind: scope.NamespacesByKind,
+		},
 		Workloads: []RightsizingScanWorkload{},
 	}
 }
@@ -130,14 +305,24 @@ func computeRightsizingScan(ctx context.Context, client rightsizingScanQuerier, 
 	sortScanWorkloads(workloads)
 	resp.Coverage.WorkloadsDiscovered = len(workloads)
 	if len(workloads) == 0 {
-		limitations := len(resp.Coverage.RestrictedKinds) + len(resp.Coverage.UnavailableKinds)
+		// Unreadable and partially-cached are counted separately. A kind whose
+		// informer covers only some namespaces is still readable, so folding it
+		// in here would report "every workload kind is unreadable" for a
+		// namespace-scoped Radar whose covered namespaces simply hold none.
+		unreadable := countDistinct(resp.Coverage.deniedKinds, resp.Coverage.UnavailableKinds)
+		narrowed := countDistinct(resp.Coverage.RestrictedKinds, resp.Coverage.UnavailableKinds, resp.Coverage.PartiallyCachedKinds)
 		switch {
-		case limitations >= 3:
+		case unreadable >= len(RightsizingScanKinds):
 			resp.State = RightsizingScanUnavailable
 			resp.Reason = "workload_kinds_unavailable"
-		case limitations > 0:
+		case narrowed > 0:
 			resp.State = RightsizingScanPartial
 			resp.Reason = "limited_scope_no_workloads"
+		case resp.Coverage.DaemonSetsWithoutNodes > 0:
+			// Workloads exist; every one was skipped on purpose, which
+			// no_workloads' "found none" would contradict.
+			resp.State = RightsizingScanComplete
+			resp.Reason = "only_daemonsets_without_nodes"
 		default:
 			resp.State = RightsizingScanComplete
 			resp.Reason = "no_workloads"
@@ -148,32 +333,37 @@ func computeRightsizingScan(ctx context.Context, client rightsizingScanQuerier, 
 	ksm, err := client.Query(ctx, `count(kube_pod_owner)`)
 	if err != nil {
 		resp.Reason = "owner_metrics_query_failed"
-		resp.Warnings = append(resp.Warnings, RightsizingScanWarning{Code: "owner_metrics_query_failed", Message: err.Error()})
+		appendScanWarning(&resp, "owner_metrics_query_failed", err.Error())
 		return resp
 	}
 	if firstValue(ksm) == nil || *firstValue(ksm) <= 0 {
 		resp.Reason = "owner_metrics_missing"
 		return resp
 	}
+	replicaSetOwnersQueryFailed := false
 	if hasScanKind(workloads, "Deployment") {
 		replicaSetOwners, queryErr := client.Query(ctx, `count(kube_replicaset_owner)`)
 		if queryErr != nil || firstValue(replicaSetOwners) == nil || *firstValue(replicaSetOwners) <= 0 {
 			resp.Coverage.UnavailableKinds = appendUniqueSorted(resp.Coverage.UnavailableKinds, "Deployment")
 			workloads = withoutScanKind(workloads, "Deployment")
 			if queryErr != nil {
+				replicaSetOwnersQueryFailed = true
 				appendScanWarning(&resp, "deployment_owner_metrics_query_failed", queryErr.Error())
 			}
 		}
 	}
 	if len(workloads) == 0 {
 		resp.Reason = "deployment_owner_metrics_missing"
+		if replicaSetOwnersQueryFailed {
+			resp.Reason = "deployment_owner_metrics_query_failed"
+		}
 		return resp
 	}
 
 	resp.Coverage.Batches = (len(workloads) + rightsizingScanBatchSize - 1) / rightsizingScanBatchSize
 	for start := 0; start < len(workloads); start += rightsizingScanBatchSize {
 		if err := ctx.Err(); err != nil {
-			appendScanWarning(&resp, "scan_deadline_exceeded", err.Error())
+			appendScanWarning(&resp, ReasonScanDeadlineExceeded, err.Error())
 			break
 		}
 		end := min(start+rightsizingScanBatchSize, len(workloads))
@@ -185,6 +375,11 @@ func computeRightsizingScan(ctx context.Context, client rightsizingScanQuerier, 
 			for key, queryErr := range evidence.errors {
 				appendScanWarning(&resp, key+"_query_failed", queryErr.Error())
 			}
+			// The loop-top check never sees a deadline that cut the last batch:
+			// its queries fail with the context error and there is no next pass.
+			if err := ctx.Err(); err != nil {
+				appendScanWarning(&resp, ReasonScanDeadlineExceeded, err.Error())
+			}
 		}
 		for _, workload := range batch {
 			out := buildScanWorkload(workload, evidence)
@@ -194,7 +389,7 @@ func computeRightsizingScan(ctx context.Context, client rightsizingScanQuerier, 
 				resp.Coverage.WorkloadsWithData++
 			}
 			if workloadHasUnavailableOOMEvidence(out) {
-				appendScanWarning(&resp, "oom_evidence_unavailable", "Restart history was incomplete for some memory recommendations.")
+				appendScanWarning(&resp, ReasonOOMEvidenceUnavailable, "Restart history was incomplete for some memory recommendations.")
 			}
 		}
 	}
@@ -205,9 +400,9 @@ func computeRightsizingScan(ctx context.Context, client rightsizingScanQuerier, 
 		if resp.Reason == "" {
 			resp.Reason = "scan_incomplete"
 		}
-	case len(resp.Warnings) > 0 || resp.Coverage.WorkloadsEvaluated < len(workloads) || len(resp.Coverage.RestrictedKinds) > 0 || len(resp.Coverage.UnavailableKinds) > 0:
+	case len(resp.Warnings) > 0 || resp.Coverage.WorkloadsEvaluated < len(workloads) || len(resp.Coverage.RestrictedKinds) > 0 || len(resp.Coverage.UnavailableKinds) > 0 || len(resp.Coverage.PartiallyCachedKinds) > 0:
 		resp.State = RightsizingScanPartial
-		resp.Reason = "some_evidence_unavailable"
+		resp.Reason = ReasonSomeEvidenceUnavailable
 	default:
 		resp.State = RightsizingScanComplete
 		if resp.Coverage.WorkloadsWithData == 0 {
@@ -223,7 +418,16 @@ func queryRightsizingScanBatch(ctx context.Context, client rightsizingScanQuerie
 		cpu: map[scanKey][]float64{}, memory: map[scanKey][]float64{}, throttle: map[scanKey][]float64{},
 		restarts: map[scanKey]float64{}, terminations: map[scanKey]terminationEvidence{}, errors: map[string]error{},
 	}
-	start := now.Add(-rightsizingWindow)
+	// Prometheus aligns subquery steps to the epoch, so the per-workload path's
+	// quantile_over_time(0.95, X[7d:5m]) always samples timestamps that are
+	// multiples of the step. A range query instead walks outward from its own
+	// start, so an unaligned start samples the series at different instants and
+	// can read a different percentile — or miss a gauge's peak entirely —
+	// for the same container the per-workload path just measured. Truncating to
+	// the step puts both paths on one grid, which is what lets a caller drill
+	// from a scan into scope=workload and get the same numbers.
+	end := now.Truncate(rightsizingStep)
+	start := end.Add(-rightsizingWindow)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 2)
@@ -240,7 +444,7 @@ func queryRightsizingScanBatch(ctx context.Context, client rightsizingScanQuerie
 				mu.Unlock()
 				return
 			}
-			result, err := client.QueryRange(ctx, queries[key], start, now, rightsizingStep)
+			result, err := client.QueryRange(ctx, queries[key], start, end, rightsizingStep)
 			<-sem
 			mu.Lock()
 			defer mu.Unlock()
@@ -428,7 +632,7 @@ func scanSeriesKey(labels map[string]string) (scanKey, bool) {
 }
 
 func buildScanWorkload(input scanWorkload, evidence scanBatchEvidence) RightsizingScanWorkload {
-	out := RightsizingScanWorkload{Kind: input.kind, Namespace: input.namespace, Name: input.name, Replicas: input.replicas, ScaledToZero: input.workload.scaledToZero, Rows: make([]RightsizingRow, 0, len(input.workload.containers)*2)}
+	out := RightsizingScanWorkload{Kind: input.kind, Namespace: input.namespace, Name: input.name, Replicas: input.replicas, ScaledToZero: input.workload.scaledToZero, ManagedBy: input.workload.managedBy, Rows: make([]RightsizingRow, 0, len(input.workload.containers)*2)}
 	expected := int(rightsizingWindow/rightsizingStep) + 1
 	for _, container := range input.workload.containers {
 		key := scanKey{namespace: input.namespace, kind: input.kind, workload: input.name, container: container.name}
@@ -463,7 +667,7 @@ func buildScanRow(container containerSpec, resourceName string, key scanKey, exp
 	}
 	setCurrentQuantities(&row, request, limit, resourceName)
 	if queryErr := evidence.errors[resourceName]; queryErr != nil {
-		row.QueryError = "usage query failed"
+		row.QueryError = RowUsageQueryFailed
 		return row
 	}
 	if len(series) == 0 {
@@ -539,12 +743,21 @@ func workloadHasData(workload RightsizingScanWorkload) bool {
 
 func workloadHasUnavailableOOMEvidence(workload RightsizingScanWorkload) bool {
 	for _, row := range workload.Rows {
-		if row.Resource == "memory" && row.RecommendationReason == "oom_evidence_unavailable" {
+		if row.Resource == "memory" && row.RecommendationReason == ReasonOOMEvidenceUnavailable {
 			return true
 		}
 	}
 	return false
 }
+
+// ReasonScanDeadlineExceeded is the warning a scan records when its context
+// ended before every batch answered.
+const ReasonScanDeadlineExceeded = "scan_deadline_exceeded"
+
+// ReasonSomeEvidenceUnavailable is the reason a response carries when its rows
+// are intact but a query behind them did not answer. A workload-scope answer
+// borrows it so both scopes name the same situation the same way.
+const ReasonSomeEvidenceUnavailable = "some_evidence_unavailable"
 
 func appendScanWarning(resp *RightsizingScanResponse, code, message string) {
 	for _, warning := range resp.Warnings {
@@ -552,8 +765,25 @@ func appendScanWarning(resp *RightsizingScanResponse, code, message string) {
 			return
 		}
 	}
-	resp.Warnings = append(resp.Warnings, RightsizingScanWarning{Code: code, Message: message})
+	resp.Warnings = append(resp.Warnings, RightsizingScanWarning{Code: code, Message: boundWarningMessage(message)})
 	sort.Slice(resp.Warnings, func(i, j int) bool { return resp.Warnings[i].Code < resp.Warnings[j].Code })
+}
+
+// maxWarningMessageBytes bounds one warning message. A Prometheus error can
+// quote the whole failing query, so an unbounded scan warning runs to tens of
+// kilobytes and crowds out the rows it is annotating.
+const maxWarningMessageBytes = 400
+
+// boundWarningMessage redacts the backend address from the message and caps
+// what is left. Warnings reach MCP clients, so the address must go — it names
+// the backend and can carry credentials. Consumers key on Code, never on
+// Message, so the detail is diagnostic rather than load-bearing.
+func boundWarningMessage(message string) string {
+	message = prom.RedactURLs(message)
+	if len(message) > maxWarningMessageBytes {
+		message = message[:maxWarningMessageBytes] + "… (truncated)"
+	}
+	return message
 }
 
 func hasScanKind(workloads []scanWorkload, kind string) bool {
@@ -573,6 +803,20 @@ func withoutScanKind(workloads []scanWorkload, kind string) []scanWorkload {
 		}
 	}
 	return out
+}
+
+// countDistinct counts kinds, not list entries: the coverage lists overlap — a
+// kind readable in only some of the requested namespaces is both restricted and
+// partially cached — so summing their lengths claims more limited kinds than
+// exist, and "all kinds unavailable" would fire with one kind still readable.
+func countDistinct(lists ...[]string) int {
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, value := range list {
+			seen[value] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func appendUniqueSorted(values []string, value string) []string {
@@ -598,13 +842,16 @@ func sortScanWorkloads(workloads []scanWorkload) {
 	})
 }
 
-func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes map[string][]string) ([]scanWorkload, []string) {
+// snapshotScanWorkloads also returns each DaemonSet it skipped for matching no
+// node, as namespace/name.
+func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes map[string][]string) ([]scanWorkload, []string, []string) {
 	workloads := map[string]*scanWorkload{}
-	var unavailable []string
-	add := func(kind, namespace, name string, replicas int, podSpec *corev1.PodSpec, scaledToZero bool) {
-		key := workloadIdentity(kind, namespace, name)
-		workloads[key] = &scanWorkload{kind: kind, namespace: namespace, name: name, replicas: replicas, workload: rightsizingWorkload{
+	var unavailable, skippedDaemonSets []string
+	add := func(obj metav1.Object, kind string, replicas int, podSpec *corev1.PodSpec, scaledToZero bool) {
+		key := workloadIdentity(kind, obj.GetNamespace(), obj.GetName())
+		workloads[key] = &scanWorkload{kind: kind, namespace: obj.GetNamespace(), name: obj.GetName(), replicas: replicas, workload: rightsizingWorkload{
 			containers: extractRuntimeContainers(podSpec), currentPodOOM: map[string]bool{}, hpaManaged: map[string]bool{}, scaledToZero: scaledToZero,
+			managedBy: detectWorkloadManager(obj),
 		}}
 	}
 
@@ -616,11 +863,8 @@ func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes
 			unavailable = append(unavailable, "Deployment")
 		} else {
 			for _, item := range items {
-				replicas := int32(1)
-				if item.Spec.Replicas != nil {
-					replicas = *item.Spec.Replicas
-				}
-				add("Deployment", item.Namespace, item.Name, int(replicas), &item.Spec.Template.Spec, replicas == 0)
+				replicas := specReplicas(item.Spec.Replicas)
+				add(item, "Deployment", replicas, &item.Spec.Template.Spec, replicas == 0)
 			}
 		}
 	}
@@ -632,11 +876,8 @@ func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes
 			unavailable = append(unavailable, "StatefulSet")
 		} else {
 			for _, item := range items {
-				replicas := int32(1)
-				if item.Spec.Replicas != nil {
-					replicas = *item.Spec.Replicas
-				}
-				add("StatefulSet", item.Namespace, item.Name, int(replicas), &item.Spec.Template.Spec, replicas == 0)
+				replicas := specReplicas(item.Spec.Replicas)
+				add(item, "StatefulSet", replicas, &item.Spec.Template.Spec, replicas == 0)
 			}
 		}
 	}
@@ -648,7 +889,16 @@ func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes
 			unavailable = append(unavailable, "DaemonSet")
 		} else {
 			for _, item := range items {
-				add("DaemonSet", item.Namespace, item.Name, int(item.Status.DesiredNumberScheduled), &item.Spec.Template.Spec, item.Status.DesiredNumberScheduled == 0)
+				// Skipped before batching, not filtered afterwards: they would
+				// still spend query budget and turn the scan partial on rows
+				// that can never carry evidence.
+				if daemonSetMatchesNoNode(item) {
+					skippedDaemonSets = append(skippedDaemonSets, item.Namespace+"/"+item.Name)
+					continue
+				}
+				// A zero not yet re-observed is scanned, but still has no replica
+				// count to weigh impact by.
+				add(item, "DaemonSet", int(item.Status.DesiredNumberScheduled), &item.Spec.Template.Spec, item.Status.DesiredNumberScheduled == 0)
 			}
 		}
 	}
@@ -660,7 +910,14 @@ func snapshotScanWorkloads(ctx context.Context, cache *k8s.ResourceCache, scopes
 		out = append(out, *workload)
 	}
 	sort.Strings(unavailable)
-	return out, unavailable
+	return out, unavailable, skippedDaemonSets
+}
+
+// daemonSetMatchesNoNode trusts a zero desired count only once the controller
+// has observed the current spec: a selector changed to match nodes keeps the
+// old status until the controller reconciles it.
+func daemonSetMatchesNoNode(ds *appsv1.DaemonSet) bool {
+	return ds.Status.DesiredNumberScheduled == 0 && ds.Status.ObservedGeneration >= ds.Generation
 }
 
 func listDeployments(lister listersappsv1.DeploymentLister, namespaces []string) ([]*appsv1.Deployment, error) {

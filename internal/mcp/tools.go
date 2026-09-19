@@ -102,6 +102,8 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"context: pod status, readiness, restarts, owner workload, requests, and " +
 			"limits. kind=pods ranks individual Pods, kind=workloads aggregates Pods " +
 			"to Deployments/StatefulSets/DaemonSets/Jobs, and kind=nodes ranks Nodes. " +
+			"This is live usage, not recommendations — for whether requests/limits should " +
+			"change, use get_rightsizing. " +
 			"Use before reading logs when the symptom mentions CPU, memory, GC, OOM, " +
 			"latency, or load.",
 		Annotations: readOnly,
@@ -471,6 +473,8 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"type=instant returns current values; type=range returns time series for a window " +
 			"(since=1h default). For live top-N snapshots prefer top_resources; for metric/label " +
 			"NAME discovery use discover_metrics first — do not guess metric names. " +
+			"For cluster or namespace spend use get_cost rather than hand-writing cost queries — " +
+			"it handles currency, idle attribution, and the Kubecost vs OpenCost source split. " +
 			"Empty results include a bounded list of related active metric names when a metric family can be inferred. " +
 			"High-cardinality queries must be wrapped in topk(5, ...): oversized results return a " +
 			"summary with a suggested rewrite instead of data.",
@@ -498,6 +502,20 @@ func registerTools(server *mcp.Server, includeWrites bool, paramRegistry *toolPa
 			"(default 50) with truncated=true — narrow rather than paging.",
 		Annotations: readOnly,
 	}, logToolCall("get_prometheus_rules", handleGetPrometheusRules))
+
+	addToolWithRegistry(paramRegistry, server, &mcp.Tool{
+		Name:        "get_cost",
+		InputSchema: costInputSchema(),
+		Description: "Read estimated Kubernetes costs from OpenCost or Kubecost. Choose summary, workloads (needs namespace; add kind+name for one workload), nodes, or trend. Use get_rightsizing for request recommendations and top_resources for live usage. Check availability, scope, and cost basis before reporting totals.",
+		Annotations: readOnly,
+	}, logToolCall("get_cost", handleGetCost))
+
+	addToolWithRegistry(paramRegistry, server, &mcp.Tool{
+		Name:        "get_rightsizing",
+		InputSchema: rightsizingInputSchema(),
+		Description: "Recommend CPU/memory requests for Deployments, StatefulSets, and DaemonSets using 7 days of usage. scope=workload is cheap and precise; namespace/cluster scans can take 45s. Scan once, then inspect individual workloads. Check confidence, missing evidence, and manual-review reasons. Request reductions do not directly imply bill savings.",
+		Annotations: readOnly,
+	}, logToolCall("get_rightsizing", handleGetRightsizing))
 
 	addToolWithRegistry(paramRegistry, server, &mcp.Tool{
 		Name: "get_workload_logs",

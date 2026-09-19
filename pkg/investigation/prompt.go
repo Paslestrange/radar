@@ -3,9 +3,10 @@ package investigation
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/skyhook-io/radar/pkg/prom"
 )
 
 // ReadOnlyTools is the explicit allowlist of Radar MCP read tools an
@@ -19,6 +20,7 @@ var ReadOnlyTools = []string{
 	"list_helm_releases", "get_helm_release", "list_packages", "issues",
 	"search", "get_subject_permissions", "query_prometheus", "discover_metrics",
 	"get_prometheus_rules", "get_workload_logs", "get_cluster_upgrade_readiness",
+	"get_cost", "get_rightsizing",
 }
 
 // WriteTools are the mutating Radar MCP tools — enabled only on an apply turn
@@ -175,28 +177,7 @@ func MetricsNudge(m MetricsAvailability) string {
 	if !m.Connected {
 		return ""
 	}
-	return fmt.Sprintf("Prometheus is connected at %s; for resource, restart, throttling or latency questions run one `query_prometheus` range query over the failure window and cite it. Scope pod-level series to the workload's own pods with the diagnose bundle's `podNames` as pod=~\"^(a|b)$\", or with the workload identity labels on kube-state-metrics series; never a name prefix like pod=~\"api-.*\", which also matches sibling workloads.", promptSafeAddress(m.Address))
-}
-
-// promptSafeAddress reduces a configured URL to where the backend is: scheme,
-// host and path. The prompt is model-visible and leaves the machine, and a
-// Prometheus behind an auth proxy is commonly configured with the credential
-// in the query string (`?token=…`) rather than in userinfo, so stripping
-// userinfo alone still discloses it. The fragment goes for the same reason.
-func promptSafeAddress(address string) string {
-	u, err := url.Parse(address)
-	if err != nil {
-		return address
-	}
-	if u.User == nil && u.RawQuery == "" && u.Fragment == "" {
-		return address
-	}
-	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	u.RawFragment = ""
-	return u.String()
+	return fmt.Sprintf("Prometheus is connected at %s; for resource, restart, throttling or latency questions run one `query_prometheus` range query over the failure window and cite it. Scope pod-level series to the workload's own pods with the diagnose bundle's `podNames` as pod=~\"^(a|b)$\", or with the workload identity labels on kube-state-metrics series; never a name prefix like pod=~\"api-.*\", which also matches sibling workloads.", prom.SafeAddress(m.Address))
 }
 
 const applyGuidance = "Use the Radar write tools to make the minimal patch; do not do anything beyond " +
