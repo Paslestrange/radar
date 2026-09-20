@@ -3272,9 +3272,9 @@ export type PrometheusTimeRange =
   "10m" | "30m" | "1h" | "3h" | "6h" | "12h" | "24h" | "48h" | "7d" | "14d";
 
 // PVC usage at a moment in time, derived from kubelet_volume_stats_*.
-// HasData=false silently indicates the CSI driver doesn't report or Prom
-// isn't scraping kubelet endpoints — UI should hide the gauge in that case.
 export interface PrometheusPVCUsage {
+  // Hub packages the frontend independently from per-cluster agent upgrades.
+  status?: "available" | "no_series" | "invalid_data" | "query_failed";
   namespace: string;
   name: string;
   used: number;
@@ -3635,7 +3635,6 @@ export function usePrometheusClusterMetrics(
   });
 }
 
-// Fetch PVC usage. hasData=false when no series — UI should hide the gauge.
 export function usePrometheusPVCUsage(
   namespace: string,
   name: string,
@@ -3646,7 +3645,10 @@ export function usePrometheusPVCUsage(
     queryFn: () => fetchJSON(`/prometheus/pvc/${namespace}/${name}`),
     enabled: enabled && Boolean(namespace && name),
     staleTime: 60000,
-    refetchInterval: 120000,
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) ? false : 120000,
+    retry: (failureCount, error) =>
+      !isForbiddenError(error) && failureCount < 1,
   });
 }
 
