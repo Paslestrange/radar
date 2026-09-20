@@ -1516,8 +1516,33 @@ coverage, or support for other Kueue API versions.
 |----------|-------|---------------|
 | RayCluster | `ray.io/v1` | state + provisioning conditions |
 | RayJob | `ray.io/v1` | jobStatus + jobDeploymentStatus |
-| RayService | `ray.io/v1` | serviceStatus + upgrade/rollback conditions |
+| RayService | `ray.io/v1` | lifecycle conditions (`serviceStatus` fallback) |
 | RayCronJob | `ray.io/v1` | suspend |
+
+For an exact `ray.io/v1` RayService, REST AI detail and MCP `get_resource`
+include `resourceContext.serving.rayService` with named active/pending revisions, native
+observed generation (compare with `resource.metadata.generation`), requested suspension, declared upgrade strategy, reported percentages, and up to eight name-sorted
+Serve application states per revision (with explicit truncation). Readiness,
+upgrade/rollback, and suspension conditions remain independent in the existing
+`statusSummary`: a healthy active service can coexist with a failing pending revision. Requested suspension is
+separate from controller acknowledgement. Embedded RayCluster conditions are
+deliberately excluded: changes to them alone
+do not trigger RayService status writes. Missing percentages stay absent (normal
+for non-incremental upgrades) and explicit zero stays zero. Traffic percentages
+represent configured route weights, not measured requests.
+
+The projection follows KubeRay v1.7.0 and performs no child reads. It does not use
+deprecated state fallbacks or infer health from cluster names. Ready means proxy
+endpoints exist, not that every application is healthy; inspect the native app
+states and, when truncated, the full resource. During `NewCluster` upgrades,
+KubeRay clears the active application map while reconciling the pending revision;
+absence is not proof of an outage. Application messages, deployment
+status and the cross-revision endpoint count remain on the resource. Suspension
+tears down owned resources; resume creates new clusters.
+
+The [KubeRay controller lane](../scripts/kuberay-demo/README.md)
+checks a real healthy active revision and failed pending revision through REST
+and MCP; incremental Gateway traffic shifting is outside that lane's proof.
 
 ### KServe
 

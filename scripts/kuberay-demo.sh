@@ -505,6 +505,76 @@ radar_revisions_ready() {
   ' <<<"${services}" >/dev/null || { warn "Radar did not expose the active Serve and both head Service selectors" >&2; return 1; }
 }
 
+mcp_get_rayservice() {
+  local rayservice="$1" context="${2:-basic}" request response event
+  request="$(jq -cn \
+    --arg namespace "${DEMO_NS}" \
+    --arg rayservice "${rayservice}" \
+    --arg context "${context}" \
+    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"get_resource",arguments:{kind:"rayservices",group:"ray.io",namespace:$namespace,name:$rayservice,context:$context}}}')"
+  response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "${request}" \
+    "${RADAR_URL}/mcp")" || return 1
+  event="$(sed -n 's/^data: //p' <<<"${response}" | tail -n 1)"
+  [ -n "${event}" ] || { warn "MCP response contained no SSE data event" >&2; return 1; }
+  if jq -e '.error != null or .result.isError == true' <<<"${event}" >/dev/null; then
+    jq -c '{error, result}' <<<"${event}" >&2
+    return 1
+  fi
+  jq -er '.result.content[0].text | fromjson' <<<"${event}"
+}
+
+
+radar_serving_matches() {
+  local native expected rest_response mcp_response actual
+  native="$(rayservice_json)" || return 1
+  expected="$(jq -ceS '
+    def generation: if . == null or . == 0 then {} else {observedGeneration:.} end;
+    {rayService: ({suspendRequested:false, upgradeStrategy:"NewCluster",
+     active:{clusterName:.status.activeServiceStatus.rayClusterName},
+     pending:{clusterName:.status.pendingServiceStatus.rayClusterName}}
+     + (.status.observedGeneration | generation))}
+  ' <<<"${native}")" || return 1
+  rest_response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+    "${RADAR_URL}/api/ai/resources/rayservices/${DEMO_NS}/${RAYSERVICE_NAME}?group=ray.io")" || return 1
+  mcp_response="$(mcp_get_rayservice "${RAYSERVICE_NAME}")" || return 1
+  local response
+  for response in "${rest_response}" "${mcp_response}"; do
+    jq -e --arg name "${RAYSERVICE_NAME}" --arg namespace "${DEMO_NS}" \
+      --argjson generation "$(jq -er .metadata.generation <<<"${native}")" '
+      .resource.apiVersion == "ray.io/v1" and .resource.kind == "RayService" and
+      .resource.metadata.name == $name and .resource.metadata.namespace == $namespace and
+      .resource.metadata.generation == $generation and
+      .resourceContext.tier == "basic" and (.resourceContext | has("execution") | not) and
+      any(.resourceContext.statusSummary.conditions[]?;
+          .type == "Ready" and .status == "True" and .reason == "NonZeroServeEndpoints") and
+      any(.resourceContext.statusSummary.conditions[]?;
+          .type == "UpgradeInProgress" and .status == "True" and .reason == "BothActivePendingClustersExist")
+    ' <<<"${response}" >/dev/null || { warn "REST/MCP returned wrong RayService identity, tier or finite execution context" >&2; return 1; }
+    actual="$(jq -ceS '.resourceContext.serving' <<<"${response}")" || return 1
+    if [ "${actual}" != "${expected}" ]; then
+      printf 'Expected: %s\nActual: %s\n' "${expected}" "${actual}" >&2
+      warn "RayService serving projection differs from controller-earned evidence" >&2
+      return 1
+    fi
+  done
+  rest_response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+    "${RADAR_URL}/api/ai/resources/rayservices/${DEMO_NS}/${RAYSERVICE_NAME}?group=ray.io&context=none")" || return 1
+  mcp_response="$(mcp_get_rayservice "${RAYSERVICE_NAME}" none)" || return 1
+  for response in "${rest_response}" "${mcp_response}"; do
+    jq -e --arg name "${RAYSERVICE_NAME}" --arg namespace "${DEMO_NS}" \
+      --argjson generation "$(jq -er .metadata.generation <<<"${native}")" '
+      .apiVersion == "ray.io/v1" and .kind == "RayService" and
+      .metadata.name == $name and .metadata.namespace == $namespace and
+      .metadata.generation == $generation and (has("resourceContext") | not)
+    ' <<<"${response}" >/dev/null || { warn "REST/MCP context=none lost resource generation or emitted context" >&2; return 1; }
+  done
+  ok "REST and MCP agree: Ready while upgrading, exact active/pending names, both application maps unreported"
+}
+
 cmd_verify_radar() {
   require_cmd kind "https://kind.sigs.k8s.io/"
   require_cmd kubectl "https://kubernetes.io/docs/tasks/tools/"
@@ -525,7 +595,8 @@ cmd_verify_radar() {
   wait_until "Radar Pod ownership and role labels" radar_inventory_ready pods ""
   wait_until "Radar Service ownership and selectors" radar_inventory_ready services ""
   wait_until "Radar active/pending revision status" radar_revisions_ready
-  ok "Radar returned group-aware RayService/RayCluster status and exact Pod/Service lineage"
+  wait_until "Radar REST/MCP serving evidence" radar_serving_matches
+  ok "Radar returned group-aware RayService/RayCluster status, exact lineage and matching serving context"
 }
 
 cmd_up() {

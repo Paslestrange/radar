@@ -43,6 +43,7 @@ type ResourceContext struct {
 	StatusSummary   *StatusSummary     `json:"statusSummary,omitempty"`
 	Scheduling      *SchedulingSummary `json:"scheduling,omitempty"`
 	Execution       *ExecutionSummary  `json:"execution,omitempty"`
+	Serving         *ServingSummary    `json:"serving,omitempty"`
 	PodSummary      *PodSummary        `json:"podSummary,omitempty"`
 	WorkloadSummary *WorkloadSummary   `json:"workloadSummary,omitempty"`
 	ServiceSummary  *ServiceSummary    `json:"serviceSummary,omitempty"`
@@ -206,6 +207,8 @@ type ReferenceUse struct {
 type StatusSummary struct {
 	Phase      string             `json:"phase,omitempty"`
 	Conditions []ConditionSummary `json:"conditions,omitempty"`
+	// ConditionsTruncated reports a cap on the source array, before invalid entries are skipped.
+	ConditionsTruncated bool `json:"conditionsTruncated,omitempty"`
 }
 
 // ConditionSummary preserves one Kubernetes condition as bounded factual

@@ -53,6 +53,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/policyreports"
 	"github.com/skyhook-io/radar/pkg/resourcecontext"
 	"github.com/skyhook-io/radar/pkg/schedulinginsight"
+	"github.com/skyhook-io/radar/pkg/servinginsight"
 	"github.com/skyhook-io/radar/pkg/topology"
 )
 
@@ -475,6 +476,7 @@ func (s *Server) buildAIResourceContext(r *http.Request, obj runtime.Object, kin
 		AuditSummary:  auditSum,
 		Scheduling:    schedulinginsight.ForResource(obj, resourcecontext.TierBasic),
 		Execution:     executioninsight.ForResource(obj, resourcecontext.TierBasic),
+		Serving:       servinginsight.ForResource(obj),
 		AppReferences: resourcecontextrefs.AppReferencesFromEnvChecks(
 			k8s.FindEnvServiceRefChecksForObject(cache, obj),
 			k8s.FindDuplicateEnvVarsForObject(obj),
