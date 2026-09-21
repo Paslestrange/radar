@@ -16,6 +16,16 @@ import (
 	"github.com/skyhook-io/radar/pkg/investigation"
 )
 
+func TestResolveAgentOpencode(t *testing.T) {
+	for _, bin := range []string{"opencode", "opencode.exe", "opencode.cmd", "OpenCode.EXE", "opencode-capture"} {
+		path := filepath.Join("tools", bin)
+		agent := resolveAgent(path)
+		if agent.Name() != "opencode" || agent.Path() != path {
+			t.Errorf("resolveAgent(%q) = %s at %s", path, agent.Name(), agent.Path())
+		}
+	}
+}
+
 func TestOpencodeConfigAndCommand(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENCODE_CONFIG", "/test/opencode.json")
@@ -56,6 +66,10 @@ func TestOpencodeConfigAndCommand(t *testing.T) {
 	}
 
 	var cfg struct {
+		ToolOutput struct {
+			MaxBytes int `json:"max_bytes"`
+			MaxLines int `json:"max_lines"`
+		} `json:"tool_output"`
 		MCP map[string]struct {
 			Type string `json:"type"`
 			URL  string `json:"url"`
@@ -70,6 +84,13 @@ func TestOpencodeConfigAndCommand(t *testing.T) {
 	}
 	if srv.Type != "remote" || srv.URL != url {
 		t.Errorf("opencode.json radar entry = %+v, want type=remote, url=%s", srv, url)
+	}
+	marker := investigation.RefMarker("ev_"+strings.Repeat("a", 128)+"_"+strings.Repeat("b", 128)) + "\n\n"
+	for _, payload := range []string{strings.Repeat("\U0010ffff", maxToolPayload), strings.Repeat("\n", maxToolPayload)} {
+		output := marker + payload
+		if len(output) > cfg.ToolOutput.MaxBytes || strings.Count(output, "\n")+1 > cfg.ToolOutput.MaxLines {
+			t.Fatal("OpenCode would truncate a result within Radar's retention limit")
+		}
 	}
 	cmd, cleanup, err = a.command(context.Background(), turnSpec{
 		mcpURL: url, prompt: "follow up", workdir: dir, sessionID: "ses_existing", profile: ExecutionProfileFullLocal,

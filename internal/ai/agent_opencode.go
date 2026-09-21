@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/skyhook-io/radar/pkg/investigation"
 )
@@ -73,6 +74,11 @@ func writeOpencodeConfig(workdir, mcpURL string) error {
 	}
 
 	cfg := map[string]any{
+		// Preserve any result Radar can retain, including UTF-8 and the evidence marker.
+		"tool_output": map[string]int{
+			"max_bytes": utf8.UTFMax*maxToolPayload + 1024,
+			"max_lines": maxToolPayload + 1024,
+		},
 		"mcp": map[string]any{
 			"radar": map[string]any{
 				"type": "remote",
