@@ -13,6 +13,7 @@ import (
 	"testing/iotest"
 
 	"github.com/skyhook-io/radar/internal/investigationrefs"
+	"github.com/skyhook-io/radar/pkg/investigation"
 )
 
 func TestOpencodeConfigAndCommand(t *testing.T) {
@@ -108,7 +109,8 @@ func TestOpencodeLiveDiagnosisAndFollowup(t *testing.T) {
 		want := 1
 		if name == "diagnosis" {
 			want = 2
-			if !strings.Contains(d.RootCause, "GREETING") || len(d.caseRequest.items) != 4 {
+			investigation.Bind(&d.Verdict, d.citations, func(string) bool { return true })
+			if !strings.Contains(d.RootCause, "GREETING") || len(d.Evidence) != 4 {
 				t.Fatalf("lost structured diagnosis: %+v", d)
 			}
 		}
@@ -117,7 +119,7 @@ func TestOpencodeLiveDiagnosisAndFollowup(t *testing.T) {
 		}
 		ids := map[string]bool{}
 		for _, step := range steps {
-			if step.ID == "" || ids[step.ID] || step.Status != "done" || !isRadarReadTool(step.Tool) {
+			if step.ID == "" || ids[step.ID] || step.Status != "done" || !investigation.IsReadOnlyTool(step.Tool) {
 				t.Fatalf("tool identity/completion lost: %+v", step)
 			}
 			ids[step.ID] = true
@@ -168,17 +170,17 @@ func TestOpencodeToolEvidenceRequiresPrivateIssuance(t *testing.T) {
 			if private {
 				ref, _ = refs.Issue(scope, payload)
 			}
-			output, _ := json.Marshal(investigationEvidenceMarkerPrefix + ref + investigationEvidenceMarkerSuffix + "\n\n" + payload)
+			output, _ := json.Marshal(investigation.RefMarker(ref) + "\n\n" + payload)
 			stream := `{"type":"tool_use","part":{"id":"call1","tool":"radar_get_resource","state":{"status":"` + status + `","input":{"kind":"Pod"},"output":` + string(output) + `,"error":` + string(output) + `}}}`
 			validator := investigationEvidenceValidator{registry: refs, scope: scope, claimed: map[string]struct{}{}}
 			events := []RunEvent{{Event: StreamEvent{Type: "turn"}}}
 			(&opencodeAgent{}).parseStream(strings.NewReader(stream), func(ev StreamEvent) {
 				events = append(events, RunEvent{Event: validator.validate(ev)})
 			})
-			got := bindEvidenceWithIssued(events, evidenceReferenceRequest{present: true, refs: []string{ref}}, scope, lease.Close())
-			want := EvidenceInvalid
+			got := bindEvidenceWithIssued(events, rootCauseCitations([]string{ref}), scope, lease.Close())
+			want := investigation.Invalid
 			if private && status == "completed" {
-				want = EvidenceLinked
+				want = investigation.Linked
 			}
 			if got == nil || got.Status != want {
 				t.Fatalf("status=%s private=%v: evidence=%+v, want %s", status, private, got, want)
@@ -219,7 +221,7 @@ func TestOpencodeProviderAndStreamErrors(t *testing.T) {
 	}
 	a := &opencodeAgent{}
 	d := a.parseStream(strings.NewReader(string(stream)), func(StreamEvent) {})
-	if !d.cliErrored || !strings.Contains(d.cliErrText, "free tier") || d.structured() {
+	if !d.cliErrored || !strings.Contains(d.cliErrText, "free tier") || d.Structured() {
 		t.Fatalf("provider error was lost: %+v", d)
 	}
 	if err := agentExitError(a.Name(), a.SigninCmd(), d.cliErrText, ""); !strings.Contains(err.Error(), "free tier") {

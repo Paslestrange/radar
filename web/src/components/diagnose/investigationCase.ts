@@ -54,7 +54,7 @@ export interface InvestigationCaseResolution {
 }
 
 /**
- * One half of a Go↔TS contract: `evidenceRoles` in internal/ai/parse.go and the
+ * One half of a Go↔TS contract: `Roles` in pkg/investigation/verdict.go and the
  * DiagnosisEvidenceRole union in api/diagnose.ts must list exactly these roles.
  * A role the parser accepts but this set omits is bound server-side and then
  * silently dropped here. Change all three together.
@@ -388,7 +388,8 @@ function observationMatchesSubject(
     // "metrics" alone cannot name one; "metrics:<category>" picks the chart
     // whose identity ends in that category. An agent-run query is one chart,
     // so a qualifier on it carries no meaning.
-    const [kind, qualifier] = subject.observation.toLowerCase().split(":", 2);
+    const [word, qualifier] = subject.observation.toLowerCase().split(":", 2);
+    const kind = word === "issues" ? "issue" : word;
     if (
       kind !== observation.data.type &&
       !(kind === "resource" && RESOURCE_SHAPED.has(observation.data.type))

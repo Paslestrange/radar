@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/skyhook-io/radar/pkg/investigation"
 )
 
 // opencodeAgent drives the OpenCode CLI (`opencode`).
@@ -156,7 +158,7 @@ func (a *opencodeAgent) parseStream(r io.Reader, onEvent func(StreamEvent)) Diag
 			if isError {
 				output = part.State.Error
 			}
-			resultText, evidenceRef := splitInvestigationEvidenceMarker(output)
+			resultText, evidenceRef := investigation.SplitRefMarker(output)
 			if evidenceRef != "" {
 				// OpenCode joins MCP text blocks with two newlines after the marker block.
 				resultText = strings.TrimPrefix(resultText, "\n\n")

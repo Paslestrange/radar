@@ -35,7 +35,7 @@ import {
   STEP_KIND_LABEL,
   assessmentCopyText,
 } from "./assessmentCopy";
-import { AIMarkdown, CopyButton } from "./AIMarkdown";
+import { AIMarkdown, CopyButton, tidyFences } from "./AIMarkdown";
 import { prettyTool } from "./toolCallLabel";
 
 export function ResultCard({
@@ -134,6 +134,7 @@ export function ResultCard({
     return section === "actions" ? null : (
       <AllClearCard
         diagnosis={diagnosis}
+        explanation={explanation}
         animate={animate}
         showDisclaimer={showDisclaimer}
         coverageLimited={coverageLimited}
@@ -170,6 +171,9 @@ export function ResultCard({
       <>
         <InconclusiveCard
           diagnosis={diagnosis}
+          explanation={explanation}
+          assessmentSources={assessmentSources}
+          assessmentAction={assessmentAction}
           animate={animate}
           storyInline={storyInline}
           revisedAfter={revisedAfter}
@@ -188,12 +192,6 @@ export function ResultCard({
             readOnlyAssessment={readOnlyAssessment}
           />
         ) : null}
-        {assessmentSources ? (
-          <AssessmentSourceDetails>{assessmentSources}</AssessmentSourceDetails>
-        ) : null}
-        {assessmentAction && (
-          <div className="mt-2 flex justify-end">{assessmentAction}</div>
-        )}
       </>
     );
   }
@@ -446,6 +444,7 @@ export function AssessmentSources({
   investigationCase,
   unlinkedEvidence = 0,
   evidenceMalformed = false,
+  omittedEntries = 0,
   readOnly = false,
   renderedGroupIds,
   onViewSource,
@@ -464,6 +463,12 @@ export function AssessmentSources({
    * and no count describes how many were lost.
    */
   evidenceMalformed?: boolean;
+  /**
+   * Next steps, open items and ruled-out hypotheses the server left out of
+   * the record because the list ran past the page's limit. They were valid;
+   * the reader learns the list was longer than what is shown.
+   */
+  omittedEntries?: number;
   readOnly?: boolean;
   /**
    * Groups the Evidence pane actually rendered. A card-placed note whose card
@@ -475,7 +480,12 @@ export function AssessmentSources({
   onViewSource: (sourceId: string) => void;
 }) {
   const rows = assessmentSourceRows(resolution, investigationCase);
-  if (rows.length === 0 && unlinkedEvidence === 0 && !evidenceMalformed)
+  if (
+    rows.length === 0 &&
+    unlinkedEvidence === 0 &&
+    !evidenceMalformed &&
+    omittedEntries === 0
+  )
     return null;
   return (
     <div className="mt-3 border-t border-theme-border/60 pt-2">
@@ -564,6 +574,13 @@ export function AssessmentSources({
           {unlinkedEvidence === 1
             ? "1 agent note could not be linked to a Radar result and is not shown."
             : `${unlinkedEvidence} agent notes could not be linked to Radar results and are not shown.`}
+        </p>
+      ) : null}
+      {omittedEntries > 0 ? (
+        <p className="mt-2 text-[11px] text-theme-text-tertiary">
+          {omittedEntries === 1
+            ? "1 next step, open item or ruled-out hypothesis went past the page's limit and is not shown."
+            : `${omittedEntries} next steps, open items or ruled-out hypotheses went past the page's limits and are not shown.`}
         </p>
       ) : null}
     </div>
@@ -656,8 +673,201 @@ export type AssessmentExplanation = {
   openRequest?: number;
 };
 
-// The diagnosis result: likely cause + remediation + the
-// agent's full analysis on demand.
+function AssessmentDetails({
+  diagnosis,
+  explanation,
+  assessmentAction,
+  assessmentSources,
+  showAnalysisDisclosure = false,
+  showConfidence = false,
+  analysisText = diagnosis.report,
+}: {
+  diagnosis: Diagnosis;
+  explanation?: AssessmentExplanation;
+  assessmentAction?: ReactNode;
+  assessmentSources?: ReactNode;
+  showAnalysisDisclosure?: boolean;
+  showConfidence?: boolean;
+  analysisText?: string;
+}) {
+  const [detail, setDetail] = useState<"analysis" | "explanation" | null>(
+    explanation?.status === "running" ? "explanation" : null,
+  );
+  const showAnalysis = detail === "analysis";
+  const analysisReveal = useDisclosureReveal<HTMLDivElement>();
+  const { elementRef: analysisElementRef, revealAfterToggle: revealAnalysis } =
+    analysisReveal;
+  useEffect(() => {
+    if (explanation?.openRequest) {
+      setDetail("explanation");
+      revealAnalysis(true);
+    }
+  }, [explanation?.openRequest, revealAnalysis]);
+  useEffect(() => {
+    if (
+      detail === "explanation" &&
+      (explanation?.status === "done" || explanation?.status === "error")
+    ) {
+      const element = analysisElementRef.current;
+      const scroller = element?.closest("[data-investigation-findings-scroll]");
+      if (element && scroller) {
+        const top = element.getBoundingClientRect().top;
+        const viewport = scroller.getBoundingClientRect();
+        if (top >= viewport.top && top < viewport.bottom) revealAnalysis(true);
+      }
+    }
+  }, [explanation?.status, detail, analysisElementRef, revealAnalysis]);
+  const analysisId = useId();
+  return (
+    <>
+      {/* Full analysis — the agent's detailed evidence, on demand. Under the
+          story contract Findings renders the story itself, so only the
+          explanation and sources remain here. */}
+      {((showAnalysisDisclosure && diagnosis.report) ||
+        (showAnalysisDisclosure && diagnosis.confidence != null) ||
+        explanation ||
+        assessmentAction ||
+        assessmentSources) && (
+        <div>
+          <div
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2"
+            data-assessment-actions
+          >
+            {((showAnalysisDisclosure && diagnosis.report) ||
+              (showAnalysisDisclosure && diagnosis.confidence != null) ||
+              assessmentSources) && (
+              <button
+                type="button"
+                aria-expanded={showAnalysis}
+                aria-controls={`${analysisId}-analysis`}
+                onClick={() => {
+                  setDetail(showAnalysis ? null : "analysis");
+                  analysisReveal.revealAfterToggle(!showAnalysis);
+                }}
+                className="flex items-center gap-1.5 rounded-md py-2 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
+              >
+                <CollapseChevron open={showAnalysis} className="h-3.5 w-3.5" />
+                {showAnalysisDisclosure && diagnosis.report
+                  ? "Full analysis"
+                  : "Assessment details"}
+              </button>
+            )}
+            {explanation && (
+              <Tooltip
+                content={
+                  explanation.status === "idle"
+                    ? explanation.onGenerate
+                      ? "Ask the agent to explain this assessment and its proposed next steps in plain language."
+                      : "Wait for the current agent request to finish before requesting an explanation."
+                    : explanation.status === "running"
+                      ? "The agent is preparing an explanation. You can close this and return while it runs."
+                      : explanation.status === "error"
+                        ? "View the explanation error and retry when the agent is available."
+                        : "Show the saved plain-language explanation. No new request is needed."
+                }
+              >
+                <button
+                  type="button"
+                  aria-expanded={detail === "explanation"}
+                  aria-controls={`${analysisId}-explanation`}
+                  disabled={
+                    explanation.status === "idle" && !explanation.onGenerate
+                  }
+                  onClick={() => {
+                    const open = detail !== "explanation";
+                    setDetail(open ? "explanation" : null);
+                    analysisReveal.revealAfterToggle(open);
+                    if (open && explanation.status === "idle")
+                      explanation.onGenerate?.();
+                  }}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-theme-text-secondary hover:bg-theme-hover hover:text-theme-text-primary disabled:opacity-50"
+                >
+                  <HelpCircle className="h-3 w-3" />
+                  Explain simply
+                </button>
+              </Tooltip>
+            )}
+            {assessmentAction && (
+              <div className="ml-auto">{assessmentAction}</div>
+            )}
+          </div>
+          <div id={analysisId} ref={analysisReveal.elementRef}>
+            <div id={`${analysisId}-analysis`}>
+              <Collapse open={detail === "analysis"} mountLazily>
+                <div className="border-t border-theme-border/60 px-3 py-2">
+                  {showAnalysisDisclosure ? (
+                    <>
+                      {showConfidence && (
+                        <p className="mb-2 text-xs text-theme-text-tertiary">
+                          Agent confidence:{" "}
+                          {diagnosis.confidence != null
+                            ? confidenceLabel(diagnosis.confidence)
+                            : "not stated"}
+                          {diagnosis.confidence != null
+                            ? " · self-reported"
+                            : ""}
+                        </p>
+                      )}
+                      <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_h2:first-child]:mt-0 [&_h2]:mb-1.5 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:uppercase [&_h2]:tracking-wide [&_h2]:text-theme-text-tertiary [&_h3]:text-sm [&_li]:text-theme-text-secondary [&_p]:my-1.5 [&_p]:text-theme-text-secondary">
+                        {analysisText}
+                      </AIMarkdown>
+                    </>
+                  ) : null}
+                  {assessmentSources}
+                </div>
+              </Collapse>
+            </div>
+            <div id={`${analysisId}-explanation`}>
+              <Collapse open={detail === "explanation"} mountLazily>
+                <div className="border-t border-theme-border/60 px-3 py-2">
+                  {explanation?.status === "running" ? (
+                    <div
+                      role="status"
+                      className="flex items-center gap-2 py-2 text-sm text-theme-text-secondary"
+                    >
+                      <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+                      Explaining this assessment…
+                    </div>
+                  ) : explanation?.status === "done" ? (
+                    <div className="flex items-start gap-2">
+                      <AIMarkdown className="min-w-0 flex-1 text-sm text-theme-text-secondary [overflow-wrap:anywhere]">
+                        {explanation.text || ""}
+                      </AIMarkdown>
+                      <CopyButton
+                        text={explanation.text || ""}
+                        label="Copy explanation"
+                      />
+                    </div>
+                  ) : explanation?.status === "error" ? (
+                    <div
+                      role="alert"
+                      className="flex flex-wrap items-center gap-2 py-2 text-sm text-theme-text-secondary"
+                    >
+                      <span>
+                        {explanation.error ||
+                          "The agent did not return an explanation."}
+                      </span>
+                      {explanation.onGenerate && (
+                        <button
+                          type="button"
+                          onClick={explanation.onGenerate}
+                          className="rounded-md px-2 py-1 text-xs font-medium text-accent-text hover:bg-theme-hover"
+                        >
+                          Try again
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              </Collapse>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function DiagnosisResult({
   diagnosis,
   onApply,
@@ -700,37 +910,9 @@ function DiagnosisResult({
       ? storyPlainText(diagnosis.report)
       : diagnosis.report;
   const showAnalysisDisclosure = !storyShape || storyInline;
-  const [detail, setDetail] = useState<"analysis" | "explanation" | null>(
-    explanation?.status === "running" ? "explanation" : null,
-  );
-  const showAnalysis = detail === "analysis";
-  const analysisReveal = useDisclosureReveal<HTMLDivElement>();
-  const { elementRef: analysisElementRef, revealAfterToggle: revealAnalysis } =
-    analysisReveal;
-  useEffect(() => {
-    if (explanation?.openRequest) {
-      setDetail("explanation");
-      revealAnalysis(true);
-    }
-  }, [explanation?.openRequest, revealAnalysis]);
-  useEffect(() => {
-    if (
-      detail === "explanation" &&
-      (explanation?.status === "done" || explanation?.status === "error")
-    ) {
-      const element = analysisElementRef.current;
-      const scroller = element?.closest("[data-investigation-findings-scroll]");
-      if (element && scroller) {
-        const top = element.getBoundingClientRect().top;
-        const viewport = scroller.getBoundingClientRect();
-        if (top >= viewport.top && top < viewport.bottom) revealAnalysis(true);
-      }
-    }
-  }, [explanation?.status, detail, analysisElementRef, revealAnalysis]);
   const [showAllSteps, setShowAllSteps] = useState(false);
   const stepsId = useId();
   const stepsReveal = useDisclosureReveal<HTMLDivElement>();
-  const analysisId = useId();
   // Only a real structured cause anchors the amber card; the full prose lives in
   // "Full analysis" (never relabel the report as a causal assessment).
   const rootCause = diagnosis.rootCause;
@@ -765,6 +947,7 @@ function DiagnosisResult({
   }) => {
     const isRec = recValid && i === recIdx! - 1;
     const step = typedSteps ? steps[i] : undefined;
+    const commands = remediationCommands(r);
     return (
       <div
         key={i}
@@ -823,17 +1006,6 @@ function DiagnosisResult({
                     Apply…
                   </button>
                 )}
-                {remediationCommands(r).map((command, c, all) => (
-                  <CopyButton
-                    key={c}
-                    text={command}
-                    label={
-                      all.length > 1
-                        ? `Copy command ${c + 1} of step ${i + 1}`
-                        : `Copy command from step ${i + 1}`
-                    }
-                  />
-                ))}
               </div>
             </div>
             {/* The condition and the reason are read before the command is
@@ -854,7 +1026,19 @@ function DiagnosisResult({
                 {diagnosis.recommendedReason}
               </p>
             )}
-            <AIMarkdown className="max-w-[100ch] text-sm [overflow-wrap:anywhere] [&_p]:my-0 [&_pre]:my-1.5">
+            <AIMarkdown
+              className="max-w-[100ch] text-sm [overflow-wrap:anywhere] [&_p]:my-0 [&_pre]:my-1.5"
+              codeActions={(code) => {
+                const command = code.trim();
+                if (!commands.includes(command)) return null;
+                return (
+                  <CopyButton
+                    text={command}
+                    label={`Copy command from step ${i + 1}`}
+                  />
+                );
+              }}
+            >
               {r}
             </AIMarkdown>
           </div>
@@ -1015,152 +1199,17 @@ function DiagnosisResult({
         </div>
       )}
 
-      {/* Full analysis — the agent's detailed evidence, on demand. Under the
-          story contract Findings renders the story itself, so only the
-          explanation and sources remain here. */}
-      {showConclusion &&
-        ((showAnalysisDisclosure && diagnosis.report) ||
-          (showAnalysisDisclosure && diagnosis.confidence != null) ||
-          explanation ||
-          assessmentAction ||
-          assessmentSources) && (
-          <div>
-            <div
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2"
-              data-assessment-actions
-            >
-              {((showAnalysisDisclosure && diagnosis.report) ||
-                (showAnalysisDisclosure && diagnosis.confidence != null) ||
-                assessmentSources) && (
-                <button
-                  type="button"
-                  aria-expanded={showAnalysis}
-                  aria-controls={`${analysisId}-analysis`}
-                  onClick={() => {
-                    setDetail(showAnalysis ? null : "analysis");
-                    analysisReveal.revealAfterToggle(!showAnalysis);
-                  }}
-                  className="flex items-center gap-1.5 rounded-md py-2 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
-                >
-                  <CollapseChevron
-                    open={showAnalysis}
-                    className="h-3.5 w-3.5"
-                  />
-                  {showAnalysisDisclosure && diagnosis.report
-                    ? "Full analysis"
-                    : "Assessment details"}
-                </button>
-              )}
-              {explanation && (
-                <Tooltip
-                  content={
-                    explanation.status === "idle"
-                      ? explanation.onGenerate
-                        ? "Ask the agent to explain this assessment and its proposed next steps in plain language."
-                        : "Wait for the current agent request to finish before requesting an explanation."
-                      : explanation.status === "running"
-                        ? "The agent is preparing an explanation. You can close this and return while it runs."
-                        : explanation.status === "error"
-                          ? "View the explanation error and retry when the agent is available."
-                          : "Show the saved plain-language explanation. No new request is needed."
-                  }
-                >
-                  <button
-                    type="button"
-                    aria-expanded={detail === "explanation"}
-                    aria-controls={`${analysisId}-explanation`}
-                    disabled={
-                      explanation.status === "idle" && !explanation.onGenerate
-                    }
-                    onClick={() => {
-                      const open = detail !== "explanation";
-                      setDetail(open ? "explanation" : null);
-                      analysisReveal.revealAfterToggle(open);
-                      if (open && explanation.status === "idle")
-                        explanation.onGenerate?.();
-                    }}
-                    className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-theme-text-secondary hover:bg-theme-hover hover:text-theme-text-primary disabled:opacity-50"
-                  >
-                    <HelpCircle className="h-3 w-3" />
-                    Explain simply
-                  </button>
-                </Tooltip>
-              )}
-              {assessmentAction && (
-                <div className="ml-auto">{assessmentAction}</div>
-              )}
-            </div>
-            <div id={analysisId} ref={analysisReveal.elementRef}>
-              <div id={`${analysisId}-analysis`}>
-                <Collapse open={detail === "analysis"} mountLazily>
-                  <div className="border-t border-theme-border/60 px-3 py-2">
-                    {showAnalysisDisclosure ? (
-                      <>
-                        <p className="mb-2 text-xs text-theme-text-tertiary">
-                          Agent confidence:{" "}
-                          {diagnosis.confidence != null
-                            ? confidenceLabel(diagnosis.confidence)
-                            : "not stated"}
-                          {diagnosis.confidence != null
-                            ? " · self-reported"
-                            : ""}
-                        </p>
-                        <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_h2:first-child]:mt-0 [&_h2]:mb-1.5 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:uppercase [&_h2]:tracking-wide [&_h2]:text-theme-text-tertiary [&_h3]:text-sm [&_li]:text-theme-text-secondary [&_p]:my-1.5 [&_p]:text-theme-text-secondary">
-                          {analysisText}
-                        </AIMarkdown>
-                      </>
-                    ) : null}
-                    {assessmentSources}
-                  </div>
-                </Collapse>
-              </div>
-              <div id={`${analysisId}-explanation`}>
-                <Collapse open={detail === "explanation"} mountLazily>
-                  <div className="border-t border-theme-border/60 px-3 py-2">
-                    {explanation?.status === "running" ? (
-                      <div
-                        role="status"
-                        className="flex items-center gap-2 py-2 text-sm text-theme-text-secondary"
-                      >
-                        <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-                        Explaining this assessment…
-                      </div>
-                    ) : explanation?.status === "done" ? (
-                      <div className="flex items-start gap-2">
-                        <AIMarkdown className="min-w-0 flex-1 text-sm text-theme-text-secondary [overflow-wrap:anywhere]">
-                          {explanation.text || ""}
-                        </AIMarkdown>
-                        <CopyButton
-                          text={explanation.text || ""}
-                          label="Copy explanation"
-                        />
-                      </div>
-                    ) : explanation?.status === "error" ? (
-                      <div
-                        role="alert"
-                        className="flex flex-wrap items-center gap-2 py-2 text-sm text-theme-text-secondary"
-                      >
-                        <span>
-                          {explanation.error ||
-                            "The agent did not return an explanation."}
-                        </span>
-                        {explanation.onGenerate && (
-                          <button
-                            type="button"
-                            onClick={explanation.onGenerate}
-                            className="rounded-md px-2 py-1 text-xs font-medium text-accent-text hover:bg-theme-hover"
-                          >
-                            Try again
-                          </button>
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                </Collapse>
-              </div>
-            </div>
-          </div>
-        )}
+      {showConclusion && (
+        <AssessmentDetails
+          diagnosis={diagnosis}
+          explanation={explanation}
+          assessmentAction={assessmentAction}
+          assessmentSources={assessmentSources}
+          showAnalysisDisclosure={showAnalysisDisclosure}
+          showConfidence
+          analysisText={analysisText}
+        />
+      )}
 
       {showConclusion && showDisclaimer && (
         <div className="flex items-start gap-1 px-0.5 text-[11px] text-theme-text-tertiary">
@@ -1185,6 +1234,7 @@ function healthFlagSentence(flag: {
 
 export function AllClearCard({
   diagnosis,
+  explanation,
   animate,
   showDisclaimer,
   coverageLimited,
@@ -1203,6 +1253,7 @@ export function AllClearCard({
   animate: boolean;
   showDisclaimer: boolean;
   coverageLimited: boolean;
+  explanation?: AssessmentExplanation;
   evidenceConflict: boolean;
   evidenceConflictExplainedBy?: string[];
   assessmentAction?: ReactNode;
@@ -1217,9 +1268,6 @@ export function AllClearCard({
   onRevealSource?: (sourceId: string) => void;
 }) {
   const storyShape = diagnosisHasStoryShape(diagnosis);
-  const [showAnalysis, setShowAnalysis] = useState(false);
-  const analysisReveal = useDisclosureReveal<HTMLDivElement>();
-  const analysisId = useId();
   const report =
     (storyShape && !storyInline ? "" : storyPlainText(diagnosis.report)) ||
     (storyShape
@@ -1264,43 +1312,14 @@ export function AllClearCard({
   // the disclaimer are the same in both shapes.
   const trailing = (
     <>
-      {detailed || assessmentAction || assessmentSources ? (
-        <div>
-          <div
-            className="flex flex-wrap items-center gap-3 pt-2"
-            data-assessment-actions
-          >
-            {(detailed || assessmentSources) && (
-              <button
-                type="button"
-                aria-expanded={showAnalysis}
-                aria-controls={analysisId}
-                onClick={() => {
-                  setShowAnalysis(!showAnalysis);
-                  analysisReveal.revealAfterToggle(!showAnalysis);
-                }}
-                className="flex items-center gap-1.5 rounded-md py-2 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary"
-              >
-                <CollapseChevron open={showAnalysis} className="h-3.5 w-3.5" />
-                {detailed ? "Full analysis" : "Assessment details"}
-              </button>
-            )}
-            {assessmentAction && (
-              <div className="ml-auto">{assessmentAction}</div>
-            )}
-          </div>
-          <div id={analysisId} ref={analysisReveal.elementRef}>
-            <Collapse open={showAnalysis}>
-              <div className="border-t border-theme-border/60 px-3 py-2">
-                <AIMarkdown className="text-sm [overflow-wrap:anywhere] [&_p]:my-1.5 [&_p]:text-theme-text-secondary [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
-                  {detailed ? report : ""}
-                </AIMarkdown>
-                {assessmentSources}
-              </div>
-            </Collapse>
-          </div>
-        </div>
-      ) : null}
+      <AssessmentDetails
+        diagnosis={diagnosis}
+        explanation={explanation}
+        assessmentAction={assessmentAction}
+        assessmentSources={assessmentSources}
+        showAnalysisDisclosure={detailed}
+        analysisText={report}
+      />
       {showDisclaimer ? (
         <div className="flex items-start gap-1 px-0.5 text-[11px] text-theme-text-tertiary">
           <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
@@ -1423,6 +1442,9 @@ export function AllClearCard({
 // all-clear) — so "I couldn't tell" never reads as "you're fine."
 export function InconclusiveCard({
   diagnosis,
+  explanation,
+  assessmentSources,
+  assessmentAction,
   animate,
   storyInline = false,
   revisedAfter,
@@ -1432,7 +1454,10 @@ export function InconclusiveCard({
   diagnosis: Diagnosis;
   animate: boolean;
   storyInline?: boolean;
+  explanation?: AssessmentExplanation;
   revisedAfter?: string;
+  assessmentSources?: ReactNode;
+  assessmentAction?: ReactNode;
   /** Reads Radar could not complete for this assessment; listed under Still open. */
   assessmentLimits?: string[];
   assessmentCopy?: Pick<AssessmentCopyRadar, "context" | "receipts">;
@@ -1477,6 +1502,12 @@ export function InconclusiveCard({
           addressing any errors shown in Activity.
         </span>
       </div>
+      <AssessmentDetails
+        diagnosis={diagnosis}
+        explanation={explanation}
+        assessmentSources={assessmentSources}
+        assessmentAction={assessmentAction}
+      />
     </div>
   );
 }
@@ -1528,10 +1559,10 @@ export function remediationHeadline(step: string): string {
  */
 export function remediationCommands(step: string): string[] {
   const commands: string[] = [];
-  // One pass in reading order, so button N is the Nth command in the text.
+  const normalized = tidyFences(step);
   const code = /```[a-zA-Z]*\n([\s\S]*?)```|`([^`\n]+)`/g;
   let match: RegExpExecArray | null;
-  while ((match = code.exec(step))) {
+  while ((match = code.exec(normalized))) {
     if (match[1] !== undefined) {
       const body = match[1].trim();
       if (body) commands.push(body);

@@ -21,6 +21,7 @@ import {
 } from "./investigationCase";
 import { AssessmentSources, ResultCard, assessmentSourceRows } from "./parts";
 import { namedInventoryRows } from "./investigationEvidence/bodies/inventory";
+import { LogsBody } from "./investigationEvidence/bodies/streams";
 import type { Diagnosis, DiagnosisEvidenceItem } from "../../api/diagnose";
 
 const onViewSource = vi.fn();
@@ -1072,6 +1073,33 @@ describe("agent case placement (D-1, D-1b)", () => {
     ]);
   });
 
+  it.each(["issue", "issues"])(
+    "pins a %s citation to the issue observation",
+    (observation) => {
+      const resolved = resolveInvestigationCase(
+        projection,
+        {
+          evidence: [
+            linked(ref, "symptom", "The issue is the symptom.", {
+              kind: "Deployment",
+              group: "apps",
+              namespace: "shop",
+              name: "api",
+              observation,
+            }),
+          ],
+        },
+        0,
+      );
+      expect(resolved.items[0].placement).toBe("card");
+      expect(
+        projection.groups.find(
+          (group) => group.id === resolved.items[0].groupId,
+        )?.kind,
+      ).toBe("issue");
+    },
+  );
+
   it("pins a subject-bearing item to exactly the observation it names", () => {
     const resolved = resolveInvestigationCase(
       projection,
@@ -1186,6 +1214,61 @@ describe("agent case placement (D-1, D-1b)", () => {
       ["card", "logs:current:api-abc:proxy"],
     ]);
   });
+
+  it.each([
+    ["resolved", "app", "app", "card"],
+    ["wrong container", "proxy", "app", "source"],
+    ["unknown container", undefined, "app", "source"],
+  ] as const)(
+    "places a named log claim only against its %s stream",
+    (_name, container, claimedContainer, placement) => {
+      const ref = evidenceRef("a", "b");
+      const projection = project(
+        tool(
+          "logs",
+          "get_pod_logs",
+          {
+            container,
+            lines: ["ERROR missing configuration"],
+            totalLines: 1,
+            matchedLines: 1,
+            fallback: false,
+          },
+          {
+            summary: JSON.stringify({ namespace: "shop", name: "api-abc" }),
+            evidenceRef: ref,
+          },
+        ),
+      );
+      const resolved = resolveInvestigationCase(
+        projection,
+        {
+          evidence: [
+            linked(ref, "cause", "The application is missing configuration.", {
+              kind: "Pod",
+              namespace: "shop",
+              name: "api-abc",
+              container: claimedContainer,
+              observation: "logs",
+            }),
+          ],
+        },
+        0,
+      );
+      expect(resolved.items[0].placement).toBe(placement);
+      if (placement === "card") {
+        expect(resolved.items[0].groupId).toBe(projection.groups[0].id);
+      }
+      if (container === undefined) {
+        const data = projection.groups[0].latest.data;
+        expect(data.type).toBe("logs");
+        if (data.type !== "logs") throw new Error("expected log evidence");
+        const html = renderToStaticMarkup(<LogsBody data={data} />);
+        expect(html).toContain("container unknown");
+        expect(html).not.toContain("default container");
+      }
+    },
+  );
 
   it("binds to the exact earlier read and renders on its revision row, not the card head", () => {
     const first = evidenceRef("a", "c");
