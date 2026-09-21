@@ -29,6 +29,19 @@ func TestCursorConsentNoticeDisclosesAutoApprovedTools(t *testing.T) {
 	}
 }
 
+func TestOpenCodeConsentNoticeDisclosesAutoPermissions(t *testing.T) {
+	notice := strings.Join(strings.Fields(consentNotice("opencode", ai.ExecutionProfileFullLocal)), " ")
+	for _, want := range []string{
+		"OpenCode runs with --auto",
+		"permissions from your setup",
+		"Radar does not enforce a CLI sandbox",
+	} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("OpenCode consent notice missing %q:\n%s", want, notice)
+		}
+	}
+}
+
 func TestNormalizeKind(t *testing.T) {
 	cases := map[string]string{
 		"pod": "Pod", "pods": "Pod", "po": "Pod",

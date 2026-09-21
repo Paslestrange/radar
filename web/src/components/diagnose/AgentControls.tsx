@@ -245,6 +245,7 @@ export function AgentControls({
   const isCodex = selectedAgent === "codex";
   const isClaude = selectedAgent === "claude";
   const isCursor = selectedAgent === "cursor-agent";
+  const isOpenCode = selectedAgent === "opencode";
   const selectedAgentInfo = agents.find((a) => a.name === selectedAgent);
   const selectedAgentLabel =
     selectedAgentInfo?.label || selectedAgent || "agent";
@@ -302,7 +303,9 @@ export function AgentControls({
                       ? CURSOR_FULL_LOCAL_WARNING
                       : isClaude
                         ? "Claude uses the permissions from your setup; Radar does not override them."
-                        : "Radar still enables the agent CLI’s own sandbox, but that sandbox does not constrain external MCP servers."}{" "}
+                        : isOpenCode
+                          ? "OpenCode runs with --auto using the permissions from your setup; Radar does not enforce a CLI sandbox."
+                          : "Radar still enables the agent CLI’s own sandbox, but that sandbox does not constrain external MCP servers."}{" "}
                     Choose this only when you need that setup.
                   </span>
                 </div>
@@ -330,6 +333,16 @@ export function AgentControls({
                 cluster.{" "}
                 {isCursor ? (
                   CURSOR_FULL_LOCAL_WARNING
+                ) : isClaude ? (
+                  <>
+                    Claude uses the permissions from your setup; Radar does not
+                    override them.
+                  </>
+                ) : isOpenCode ? (
+                  <>
+                    OpenCode runs with --auto using the permissions from your
+                    setup; Radar does not enforce a CLI sandbox.
+                  </>
                 ) : (
                   <>
                     Radar still enables the agent CLI&apos;s own sandbox, but
@@ -597,6 +610,11 @@ export function ConsentCard({
                 <>
                   Claude uses the permissions from your setup; Radar does not
                   override them.
+                </>
+              ) : agent === "opencode" ? (
+                <>
+                  OpenCode runs with --auto using the permissions from your
+                  setup; Radar does not enforce a CLI sandbox.
                 </>
               ) : (
                 <>
