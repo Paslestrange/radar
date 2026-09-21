@@ -398,7 +398,7 @@ Radar's temporary workspace.
 			notice += `Claude uses the permissions from your setup; Radar does not override them.
 `
 		} else if agent == "opencode" {
-			notice += `OpenCode runs with --auto using the permissions from your setup; Radar does not enforce a CLI sandbox.
+			notice += `Radar runs OpenCode with --auto, which automatically approves actions that your configuration would normally ask about, including built-in tools and configured MCP servers. Explicit denials still apply. Radar does not enforce a CLI sandbox.
 `
 		} else {
 			notice += `Radar still enables the agent CLI's own sandbox, but that sandbox does not

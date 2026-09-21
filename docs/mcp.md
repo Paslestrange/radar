@@ -162,6 +162,37 @@ Add to `~/.codex/config.toml`:
 url = "http://localhost:9280/mcp"
 ```
 
+### OpenCode
+
+Add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "radar": {
+      "type": "remote",
+      "url": "http://localhost:9280/mcp"
+    }
+  }
+}
+```
+
+Radar can also run in-app investigations with an installed OpenCode CLI (tested
+with 1.18.5). Install with `npm install -g opencode-ai`; authenticate with
+`opencode auth login` or use your existing provider configuration, including AWS
+Bedrock. Model overrides use `provider/model` names from `opencode models`.
+
+OpenCode supports the **Your agent setup** execution profile only. Radar inherits
+your provider environment and OpenCode configuration, and runs with `--auto`:
+permission requests are approved automatically, including those from built-in
+tools and configured MCP servers; explicit denials still apply. Radar does not
+enforce a CLI sandbox. Diagnosis and follow-up use Radar's read-only investigation
+MCP. A confirmed Apply starts a separate write-enabled session, then resumes the
+original read-only session to verify the result. As with other agents using your
+normal setup, Radar cannot authenticate write results and reports the Apply
+outcome as uncertain until current-state verification. Terminal handoff and
+reasoning-effort controls are not available for OpenCode.
+
 ### Gemini CLI
 
 Add to `~/.gemini/settings.json`:

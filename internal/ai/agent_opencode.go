@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,11 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
-
-var opencodeSessionRe = regexp.MustCompile(`(?i)(?:session[_-]?id|session)\s*[:=]\s*"?([a-zA-Z0-9_-]+)"?`)
 
 // opencodeAgent drives the OpenCode CLI (`opencode`).
 type opencodeAgent struct{ bin string }
@@ -22,7 +20,7 @@ func (a *opencodeAgent) Name() string { return "opencode" }
 
 func (a *opencodeAgent) Path() string { return a.bin }
 
-func (a *opencodeAgent) SigninCmd() string { return "opencode providers" }
+func (a *opencodeAgent) SigninCmd() string { return "opencode auth login" }
 
 func (a *opencodeAgent) command(ctx context.Context, s turnSpec) (*exec.Cmd, func(), error) {
 	if s.profile != ExecutionProfileFullLocal {
@@ -43,9 +41,6 @@ func (a *opencodeAgent) command(ctx context.Context, s turnSpec) (*exec.Cmd, fun
 		prompt = s.systemPrompt + "\n\n" + prompt
 	}
 
-	// OpenCode expects the prompt message as positional arguments, not --prompt
-	args = append(args, prompt)
-
 	workdir := s.workdir
 	cleanup := func() {}
 	if workdir == "" {
@@ -64,7 +59,8 @@ func (a *opencodeAgent) command(ctx context.Context, s turnSpec) (*exec.Cmd, fun
 
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = workdir
-	cmd.Env = scrubbedEnv()
+	// Positional prompts are shell-quoted again by OpenCode; stdin preserves the contract verbatim.
+	cmd.Stdin = strings.NewReader(prompt)
 
 	return cmd, cleanup, nil
 }
@@ -74,7 +70,6 @@ func writeOpencodeConfig(workdir, mcpURL string) error {
 		return err
 	}
 
-	// Write local project opencode.json pointing to Radar's local MCP
 	cfg := map[string]any{
 		"mcp": map[string]any{
 			"radar": map[string]any{
@@ -90,96 +85,110 @@ func writeOpencodeConfig(workdir, mcpURL string) error {
 	return os.WriteFile(filepath.Join(workdir, "opencode.json"), b, 0o600)
 }
 
+// Fields emitted by OpenCode 1.18.5's `run --format json` command.
 type opencodeEvent struct {
 	Type      string `json:"type"`
 	SessionID string `json:"sessionID"`
-	Session   string `json:"session_id"`
 	Part      *struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-		Name string `json:"name"`
-		Tool string `json:"tool"`
+		ID    string   `json:"id"`
+		Text  string   `json:"text"`
+		Tool  string   `json:"tool"`
+		Cost  *float64 `json:"cost"`
+		State struct {
+			Status   string          `json:"status"`
+			Input    json.RawMessage `json:"input"`
+			Output   string          `json:"output"`
+			Error    string          `json:"error"`
+			Metadata struct {
+				Truncated bool `json:"truncated"`
+			} `json:"metadata"`
+		} `json:"state"`
 	} `json:"part"`
-	Content string `json:"content"`
-	Text    string `json:"text"`
-	Tool    string `json:"tool"`
-	Name    string `json:"name"`
+	Error *struct {
+		Name string `json:"name"`
+		Data struct {
+			Message string `json:"message"`
+		} `json:"data"`
+	} `json:"error"`
 }
 
 func (a *opencodeAgent) parseStream(r io.Reader, onEvent func(StreamEvent)) Diagnosis {
-	var sb strings.Builder
 	sc := bufio.NewScanner(r)
-	buf := make([]byte, 64*1024)
-	sc.Buffer(buf, 10*1024*1024)
-	var sessionID string
+	sc.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	var answer strings.Builder
+	var sessionID, errorText string
+	var cost *float64
+	var turns int
+	var cliErrored bool
 
 	for sc.Scan() {
-		line := sc.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		var ev opencodeEvent
+		if json.Unmarshal(bytes.TrimSpace(sc.Bytes()), &ev) != nil {
 			continue
 		}
-
-		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
-			var ev opencodeEvent
-			if err := json.Unmarshal([]byte(trimmed), &ev); err == nil {
-				if ev.SessionID != "" {
-					sessionID = ev.SessionID
-				} else if ev.Session != "" {
-					sessionID = ev.Session
+		if ev.SessionID != "" {
+			sessionID = ev.SessionID
+		}
+		if ev.Type == "error" {
+			cliErrored = true
+			if ev.Error != nil {
+				errorText = ev.Error.Data.Message
+				if errorText == "" {
+					errorText = ev.Error.Name
 				}
-
-				// Check for tool call events
-				toolName := ev.Tool
-				if toolName == "" {
-					toolName = ev.Name
-				}
-				if toolName == "" && ev.Part != nil {
-					if ev.Part.Tool != "" {
-						toolName = ev.Part.Tool
-					} else if ev.Part.Name != "" {
-						toolName = ev.Part.Name
-					}
-				}
-
-				isTool := ev.Type == "tool_use" || ev.Type == "tool_call" || ev.Type == "tool" ||
-					(ev.Part != nil && (ev.Part.Type == "tool_use" || ev.Part.Type == "tool_call" || ev.Part.Type == "tool"))
-
-				if isTool || toolName != "" {
-					onEvent(StreamEvent{
-						Type: "step",
-						Step: &StepInfo{
-							Tool:   toolName,
-							Status: "running",
-						},
-					})
-					continue
-				}
-
-				text := ev.Content
-				if text == "" {
-					text = ev.Text
-				}
-				if text == "" && ev.Part != nil {
-					text = ev.Part.Text
-				}
-				if text != "" {
-					sb.WriteString(text + "\n")
-					onEvent(StreamEvent{Type: "thinking", Token: text + "\n"})
-				}
+			}
+			continue
+		}
+		if ev.Part == nil {
+			continue
+		}
+		part := ev.Part
+		switch ev.Type {
+		case "text":
+			answer.WriteString(part.Text + "\n")
+			onEvent(StreamEvent{Type: "thinking", Token: part.Text + "\n"})
+		case "tool_use":
+			if part.State.Status != "completed" && part.State.Status != "error" {
 				continue
 			}
+			isError := part.State.Status == "error"
+			output := part.State.Output
+			if isError {
+				output = part.State.Error
+			}
+			resultText, evidenceRef := splitInvestigationEvidenceMarker(output)
+			if evidenceRef != "" {
+				// OpenCode joins MCP text blocks with two newlines after the marker block.
+				resultText = strings.TrimPrefix(resultText, "\n\n")
+			}
+			result, truncated := capPayload(resultText)
+			// OpenCode emits tool_use only when the call has finished.
+			onEvent(StreamEvent{Type: "step", Step: &StepInfo{
+				ID: part.ID, Tool: strings.TrimPrefix(part.Tool, "radar_"), Status: "done",
+				Summary: toolArgsText(part.State.Input), Result: result,
+				EvidenceRef: evidenceRef, IsError: &isError,
+				Truncated:      truncated || part.State.Metadata.Truncated,
+				producerResult: &resultText,
+			}})
+		case "step_finish":
+			turns++
+			if part.Cost != nil {
+				if cost == nil {
+					cost = new(float64)
+				}
+				*cost += *part.Cost
+			}
 		}
-
-		sb.WriteString(line + "\n")
-		onEvent(StreamEvent{Type: "thinking", Token: line + "\n"})
 	}
-
-	d := diagnosisFromText(sb.String())
-	if sessionID != "" {
-		d.SessionID = sessionID
-	} else if m := opencodeSessionRe.FindStringSubmatch(sb.String()); len(m) > 1 {
-		d.SessionID = m[1]
+	if err := sc.Err(); err != nil {
+		cliErrored = true
+		errorText = fmt.Sprintf("reading OpenCode output: %v", err)
 	}
+	d := diagnosisFromText(answer.String())
+	d.SessionID = sessionID
+	d.CostUSD = cost
+	d.Turns = turns
+	d.cliErrored = cliErrored
+	d.cliErrText = errorText
 	return d
 }

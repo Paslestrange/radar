@@ -1362,6 +1362,15 @@ func splitInvestigationEvidenceMarker(result string) (clean, ref string) {
 	return remainder[end+len(investigationEvidenceMarkerSuffix):], candidate
 }
 
+func toolArgsText(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == "{}" {
+		return ""
+	}
+	args, _ := capPayload(s)
+	return args
+}
+
 // capPayload truncates s to maxToolPayload runes, reporting whether it cut.
 func capPayload(s string) (string, bool) {
 	if r := []rune(s); len(r) > maxToolPayload {

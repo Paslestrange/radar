@@ -9,6 +9,9 @@ import { useAnimatedUnmount } from "../../hooks/useAnimatedUnmount";
 import type { DiagnoseConsentCopy } from "../../context/DiagnoseCustomization";
 import type { AgentInfo, ExecutionProfile } from "../../api/diagnose";
 
+const OPENCODE_FULL_LOCAL_WARNING =
+  "Radar runs OpenCode with --auto, which automatically approves actions that your configuration would normally ask about, including built-in tools and configured MCP servers. Explicit denials still apply. Radar does not enforce a CLI sandbox.";
+
 const CURSOR_FULL_LOCAL_WARNING =
   "Radar passes Cursor --force, which auto-approves its built-in tools and every MCP server it loads, including your global servers. Cursor’s sandbox does not reliably confine those tools to Radar’s temporary workspace.";
 
@@ -304,7 +307,7 @@ export function AgentControls({
                       : isClaude
                         ? "Claude uses the permissions from your setup; Radar does not override them."
                         : isOpenCode
-                          ? "OpenCode runs with --auto using the permissions from your setup; Radar does not enforce a CLI sandbox."
+                          ? OPENCODE_FULL_LOCAL_WARNING
                           : "Radar still enables the agent CLI’s own sandbox, but that sandbox does not constrain external MCP servers."}{" "}
                     Choose this only when you need that setup.
                   </span>
@@ -339,10 +342,7 @@ export function AgentControls({
                     override them.
                   </>
                 ) : isOpenCode ? (
-                  <>
-                    OpenCode runs with --auto using the permissions from your
-                    setup; Radar does not enforce a CLI sandbox.
-                  </>
+                  OPENCODE_FULL_LOCAL_WARNING
                 ) : (
                   <>
                     Radar still enables the agent CLI&apos;s own sandbox, but
@@ -386,13 +386,13 @@ export function AgentControls({
           value={model}
           placeholder={
             selectedAgent === "opencode"
-              ? "Default (e.g. opencode-1.5-pro)"
+              ? "Default (provider/model)"
               : "Default"
           }
           onChange={onSetModel}
           hint={
             selectedAgent === "opencode"
-              ? "Leave empty for OpenCode's default, or enter a supported model slug."
+              ? "Leave empty for OpenCode's default, or enter a provider/model from opencode models."
               : "Leave empty for the agent's default, or enter a model identifier it supports."
           }
         />
@@ -612,10 +612,7 @@ export function ConsentCard({
                   override them.
                 </>
               ) : agent === "opencode" ? (
-                <>
-                  OpenCode runs with --auto using the permissions from your
-                  setup; Radar does not enforce a CLI sandbox.
-                </>
+                OPENCODE_FULL_LOCAL_WARNING
               ) : (
                 <>
                   Radar still enables the agent CLI&apos;s own sandbox, but that

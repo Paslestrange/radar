@@ -345,7 +345,7 @@ func cursorToolCallEvent(e cursorEvent, onEvent func(StreamEvent)) {
 	case "started":
 		onEvent(StreamEvent{Type: "step", Step: &StepInfo{
 			ID: tc.ToolCallID, Tool: m.Args.ToolName, Status: "running",
-			Summary: cursorArgsText(m.Args.Args),
+			Summary: toolArgsText(m.Args.Args),
 		}})
 	case "completed":
 		resultText, evidenceRef := splitInvestigationEvidenceMarker(
@@ -381,15 +381,6 @@ func cursorMCPResultErrorState(result *cursorMCPResult) *bool {
 		return nil
 	}
 	return &confirmed
-}
-
-func cursorArgsText(raw json.RawMessage) string {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" || s == "{}" {
-		return ""
-	}
-	out, _ := capPayload(s)
-	return out
 }
 
 // cursorMCPResultText joins the text parts of a Cursor mcpToolCall result. Cursor
